@@ -117,6 +117,14 @@ class EngineTests(unittest.TestCase):
         offs = [m for m in self.rec.messages if m[0] & 0xF0 == 0x80]
         self.assertGreaterEqual(len(offs), 16)
 
+    def test_sustain_released_when_silenced(self):
+        self.rec.messages.clear()
+        self.eng.pause()
+        for ch in range(16):
+            pedal = [i for i, m in enumerate(self.rec.messages) if m[0] == 0xB0 | ch and m[1] == 64 and m[2] == 0]
+            off = [i for i, m in enumerate(self.rec.messages) if m[0] == 0xB0 | ch and m[1] == 123]
+            self.assertTrue(pedal and off and pedal[0] < off[0], f"ch {ch}: pedal up before all-notes-off")
+
     def test_mute_and_solo(self):
         self.eng.set_mute(9, True)
         self.play_through()

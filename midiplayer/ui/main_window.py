@@ -121,6 +121,14 @@ class MainWindow(QMainWindow):
         self._act(p, "Clear mute / solo", "Ctrl+Shift+M", self.ctl.clear_mute_solo)
         self._act(p, "Reset mixer", None, self.ctl.reset_mixer)
         p.addSeparator()
+        even = QAction("Even out note volumes", self)
+        even.setCheckable(True)
+        even.setToolTip("Reduce the gap between the quietest and loudest notes")
+        self.engine.even_dynamics = self.settings.value("evenDynamics", True, bool)
+        even.setChecked(self.engine.even_dynamics)
+        even.toggled.connect(self._set_even_dynamics)
+        p.addAction(even)
+        p.addSeparator()
         self._act(p, "Panic (all notes off)", "Ctrl+.", self.panic)
 
         self.output_menu = mb.addMenu("&Output")
@@ -471,6 +479,7 @@ class MainWindow(QMainWindow):
                 eng.master = self.engine.master
                 synth.set_gain(eng.master)
                 eng.transpose = self.engine.transpose
+                eng.even_dynamics = self.engine.even_dynamics
                 eng.events, eng.times = events, [e.time for e in events]
                 eng.duration = total
                 eng._seek(0.0)
@@ -575,6 +584,10 @@ class MainWindow(QMainWindow):
             "Mixer / channels\n"
             "Right-click S\tSolo only this channel\n"
             "Double-click fader/knob\tReset"))
+
+    def _set_even_dynamics(self, on: bool):
+        self.engine.even_dynamics = on
+        self.settings.setValue("evenDynamics", on)
 
     def open_homepage(self):
         from PySide6.QtCore import QUrl

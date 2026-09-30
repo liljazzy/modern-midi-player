@@ -95,6 +95,7 @@ class Engine:
         self.speed = 1.0
         self.transpose = 0
         self.loop = False
+        self.even_dynamics = False      # squeeze note velocities toward the middle at playback time
         self.events: List[PlaybackEvent] = []
         self.times: List[float] = []
         self.duration = 0.0
@@ -356,6 +357,9 @@ class Engine:
             for p in outs:
                 self._send(bytes([0x80 | ch, p, 0]))
         cs.active.clear()
+        # "all notes off" is ignored while the sustain pedal is down (many files end
+        # with it held), which leaves the last notes ringing after stop / song end
+        self._send(bytes([0xB0 | ch, 64, 0]))
         self._send(bytes([0xB0 | ch, 123, 0]))
         if hard:
             self._send(bytes([0xB0 | ch, 120, 0]))
@@ -451,8 +455,13 @@ class Engine:
             p = d[1]
             out = p if ch == DRUM_CHANNEL else max(0, min(127, p + self.transpose))
             cs.active.setdefault(p, []).append(out)
-            self._send(bytes([st, out, d[2]]))
-            lvl = (d[2] / 127.0) * min(1.0, self._volume_out(ch) / 100.0)
+            vel = d[2]
+            if self.even_dynamics:
+                # halve the distance from 80: 1..127 -> 40..103 (a SoundFont's velocity
+                # curve is steep, so wide-ranging files sound jumpy)
+                vel = 80 + (vel - 80) // 2
+            self._send(bytes([st, out, vel]))
+            lvl = (vel / 127.0) * min(1.0, self._volume_out(ch) / 100.0)
             if lvl > cs.level:
                 cs.level = lvl
             cs.note_count += 1

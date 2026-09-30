@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.3
+- New **Playback ▸ Even out note volumes** (on by default): narrows the gap between very loud and very quiet notes.
+- Fixed notes that kept ringing after a song ended or was stopped/paused when the file leaves the sustain pedal down.
+
 ## 1.1.2
 - Transport bar: emoji replaced with drawn icons, Play and Stop merged into one Play/Pause button (Stop is still in the Playback menu), and the Loop button now shows "Loop on" / "Loop off" with a highlighted state.
 - Added a Help ▸ Project on GitHub link.
