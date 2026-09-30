@@ -1,0 +1,3 @@
+PySide6>=6.5
+# Optional: play through hardware / virtual MIDI ports
+# python-rtmidi>=1.5

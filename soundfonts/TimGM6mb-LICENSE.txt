@@ -1,0 +1,11 @@
+TimGM6mb.sf2 — General MIDI SoundFont
+Copyright 2004 Tim Brechbill <https://www.timbrechbill.com>, 2010 David Bolton
+Source: https://github.com/musescore/musescore-old (via Debian package timgm6mb-soundfont)
+
+License: GNU General Public License version 2 (GPL-2).
+This SoundFont is free software; you can redistribute it and/or modify it under the
+terms of the GNU General Public License version 2. It is distributed WITHOUT ANY
+WARRANTY. See https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+
+Want richer sound? Drop any other General MIDI .sf2 (e.g. FluidR3_GM.sf2 or
+GeneralUser GS) into this folder, or use Output ▸ Load SoundFont… in the app.
