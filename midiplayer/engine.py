@@ -13,6 +13,7 @@ channel mixer, which implements:
 from __future__ import annotations
 
 import bisect
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -263,10 +264,10 @@ class Engine:
     def set_master(self, gain: float):
         with self.lock:
             self.master = max(0.0, min(1.5, gain))
-            # Above unity the boost goes to the synth's gain: scaling CC7 would
-            # clip at 127 and skew the balance between channels.
+            # A synth with real gain control takes the master there: scaling CC7
+            # would clip at 127 above 100% and step audibly in 1/127 increments.
             try:
-                self.backend.set_gain(max(1.0, self.master))
+                self.backend.set_gain(self.master)
             except Exception:
                 pass
             for ch in range(16):
@@ -341,7 +342,10 @@ class Engine:
 
     def _volume_out(self, ch: int) -> int:
         cs = self.channels[ch]
-        return max(0, min(127, int(round(cs.file_volume * cs.volume * min(1.0, self.master)))))
+        return max(0, min(127, int(round(cs.file_volume * cs.volume * self._master_cc()))))
+
+    def _master_cc(self) -> float:
+        return 1.0 if getattr(self.backend, "has_gain", False) else min(1.0, self.master)
 
     def _send_volume(self, ch: int):
         self._send(bytes([0xB0 | ch, 7, self._volume_out(ch)]))
@@ -496,6 +500,22 @@ class Engine:
         self._send(d)
 
     def _run(self):
+        # Windows sleeps in ~15 ms steps by default, which makes notes land unevenly
+        hires = False
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.winmm.timeBeginPeriod(1)
+                hires = True
+            except Exception:
+                pass
+        try:
+            self._run_loop()
+        finally:
+            if hires:
+                ctypes.windll.winmm.timeEndPeriod(1)
+
+    def _run_loop(self):
         while True:
             finished = False
             with self.cond:

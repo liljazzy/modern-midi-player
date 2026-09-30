@@ -127,11 +127,12 @@ def main():
     win.transport.play_btn.click()
     check(eng.is_playing(), "play button")
     win.ctl._tick.timeout.emit()
-    check(win.transport.play_btn.text() == "⏸", "play button shows pause")
+    check(win.transport.playing, "play button shows pause")
     win.transport.play_btn.click()
     win.transport.loop_btn.click()
-    check(eng.loop, "loop toggle")
+    check(eng.loop and win.transport.loop_btn.text() == "Loop on", "loop toggle")
     win.transport.loop_btn.click()
+    check(not eng.loop and win.transport.loop_btn.text() == "Loop off", "loop indicator off")
 
     print("editor")
     ed = win.editor_view

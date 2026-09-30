@@ -469,6 +469,7 @@ class MainWindow(QMainWindow):
                                  "program_override"):
                         setattr(dst, attr, getattr(src, attr))
                 eng.master = self.engine.master
+                synth.set_gain(eng.master)
                 eng.transpose = self.engine.transpose
                 eng.events, eng.times = events, [e.time for e in events]
                 eng.duration = total

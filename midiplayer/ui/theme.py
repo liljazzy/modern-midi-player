@@ -44,6 +44,10 @@ QPushButton#play:hover {{ background: #8f82ff; }}
 QPushButton#transport {{ background: transparent; border: none; font-size: 13pt; min-width: 32px; min-height: 32px; }}
 QPushButton#transport:hover {{ color: {ACCENT}; }}
 QPushButton#transport:checked {{ color: {ACCENT2}; background: transparent; }}
+QPushButton#loop {{ background: transparent; border: 1px solid {BORDER}; border-radius: 14px; color: {TEXT_DIM};
+               padding: 4px 10px; min-height: 20px; }}
+QPushButton#loop:hover {{ border-color: {ACCENT}; }}
+QPushButton#loop:checked {{ background: {ACCENT}; border-color: {ACCENT}; color: white; font-weight: 600; }}
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ background: {BG2}; border: 1px solid {BORDER};
                border-radius: 5px; padding: 3px 6px; selection-background-color: {ACCENT}; }}
 QComboBox::drop-down {{ border: none; width: 18px; }}

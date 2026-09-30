@@ -34,12 +34,13 @@ class OutputInfo:
 class Backend:
     kind = "null"
     name = "No output"
+    has_gain = False    # True if set_gain() really scales the output (the engine then leaves CC7 alone)
 
     def send(self, msg: bytes) -> None:
         pass
 
     def set_gain(self, gain: float) -> None:
-        """Optional hardware/synth master gain. Default: no-op."""
+        """Optional master gain (1.0 = unity). Default: no-op."""
 
     def reset(self) -> None:
         for ch in range(16):
@@ -160,6 +161,8 @@ def find_soundfonts(extra_dirs: Optional[List[str]] = None) -> List[str]:
 
 class FluidSynthBackend(Backend):
     kind = "fluidsynth"
+    has_gain = True
+    BASE_GAIN = 0.7     # synth gain at master 100%
 
     def __init__(self, soundfont: str, lib_path: str = "", audio_driver: str = "",
                  sample_rate: float = 44100.0, render_only: bool = False):
@@ -201,9 +204,9 @@ class FluidSynthBackend(Backend):
         L.fluid_settings_setnum(self.settings, b"synth.sample-rate", sample_rate)
         L.fluid_settings_setint(self.settings, b"synth.polyphony", 512)
         L.fluid_settings_setint(self.settings, b"synth.midi-channels", 16)
-        L.fluid_settings_setnum(self.settings, b"synth.gain", 0.7)
-        # Smaller buffers for low latency where supported
-        L.fluid_settings_setint(self.settings, b"audio.period-size", 256)
+        L.fluid_settings_setnum(self.settings, b"synth.gain", self.BASE_GAIN)
+        # 256-frame buffers underran (crackles) whenever Python / the UI was busy; ~46 ms is still responsive
+        L.fluid_settings_setint(self.settings, b"audio.period-size", 512)
         L.fluid_settings_setint(self.settings, b"audio.periods", 4)
         driver = audio_driver or {"win32": "wasapi", "darwin": "coreaudio"}.get(sys.platform, "pulseaudio")
         self.synth = L.new_fluid_synth(self.settings)
@@ -265,8 +268,11 @@ class FluidSynthBackend(Backend):
                 L.fluid_synth_key_pressure(s, ch, msg[1], msg[2])
 
     def set_gain(self, gain: float) -> None:
+        # Squared so the slider follows loudness (amplitude) rather than a flat ramp;
+        # applied inside the synth, so it is smooth and never clips CC7 at 127.
         with self._lock:
-            self.lib.fluid_synth_set_gain(self.synth, ctypes.c_float(max(0.0, min(2.0, gain * 0.7))))
+            if self.synth:
+                self.lib.fluid_synth_set_gain(self.synth, ctypes.c_float(self.BASE_GAIN * max(0.0, min(1.5, gain)) ** 2))
 
     def reset(self) -> None:
         with self._lock:

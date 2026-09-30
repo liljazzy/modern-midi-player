@@ -1,9 +1,10 @@
 """Bottom transport bar: play controls, seek bar, speed, transpose, master volume."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QPushButton, QSlider, QSpinBox, QVBoxLayout
 
+from . import glyphs, theme
 from .controller import Controller
 from .widgets import SeekSlider, fmt_time
 
@@ -54,16 +55,27 @@ class TransportBar(QFrame):
         self.title.setMaximumWidth(340)
         row.addWidget(self.title, 1)
 
-        self.prev_btn = tbtn("⏮", "Previous (Ctrl+Left)")
-        self.stop_btn = tbtn("⏹", "Stop")
-        self.play_btn = QPushButton("▶")
+        icon_size = QSize(22, 22)
+        self.prev_btn = tbtn("", "Previous song (Ctrl+Left)")
+        self.prev_btn.setIcon(glyphs.icon("prev"))
+        self.play_btn = QPushButton()
         self.play_btn.setObjectName("play")
-        self.play_btn.setToolTip("Play / Pause (Space)")
         self.play_btn.setFocusPolicy(Qt.NoFocus)
-        self.next_btn = tbtn("⏭", "Next (Ctrl+Right)")
-        self.loop_btn = tbtn("🔁", "Loop current song", checkable=True)
+        self.play_btn.setIconSize(QSize(20, 20))
+        self._play_icon = glyphs.icon("play", "#ffffff")
+        self._pause_icon = glyphs.icon("pause", "#ffffff")
+        self.next_btn = tbtn("", "Next song (Ctrl+Right)")
+        self.next_btn.setIcon(glyphs.icon("next"))
+        self.loop_btn = tbtn("Loop off", "Loop the current song: click to turn on", checkable=True)
+        self.loop_btn.setObjectName("loop")
+        self.loop_btn.setIcon(glyphs.icon("loop", theme.TEXT_DIM, "#ffffff"))
+        self.loop_btn.setFixedWidth(108)
+        for b in (self.prev_btn, self.next_btn):
+            b.setIconSize(icon_size)
+        self.loop_btn.setIconSize(QSize(18, 18))
+        self._set_playing(False)
         row.addStretch(1)
-        for b in (self.loop_btn, self.prev_btn, self.stop_btn, self.play_btn, self.next_btn):
+        for b in (self.loop_btn, self.prev_btn, self.play_btn, self.next_btn):
             row.addWidget(b)
         row.addStretch(1)
 
@@ -87,7 +99,9 @@ class TransportBar(QFrame):
         self.transpose.setToolTip("Transpose in semitones (drums unaffected)")
         row.addWidget(self.transpose)
         row.addSpacing(10)
-        row.addWidget(small_label("🔊"))
+        vol_icon = QLabel()
+        vol_icon.setPixmap(glyphs.icon("speaker", theme.TEXT_DIM).pixmap(18, 18))
+        row.addWidget(vol_icon)
         self.volume = QSlider(Qt.Horizontal)
         self.volume.setRange(0, 150)
         self.volume.setValue(100)
@@ -99,10 +113,9 @@ class TransportBar(QFrame):
 
         # wiring
         self.play_btn.clicked.connect(ctl.toggle)
-        self.stop_btn.clicked.connect(ctl.stop)
         self.prev_btn.clicked.connect(self.prevRequested.emit)
         self.next_btn.clicked.connect(self.nextRequested.emit)
-        self.loop_btn.toggled.connect(lambda v: setattr(ctl.engine, "loop", v))
+        self.loop_btn.toggled.connect(self._on_loop)
         self.speed.valueChanged.connect(lambda v: ctl.engine.set_speed(v / 100.0))
         self.transpose.valueChanged.connect(ctl.engine.set_transpose)
         self.volume.valueChanged.connect(lambda v: ctl.set_master(v / 100.0))
@@ -144,4 +157,15 @@ class TransportBar(QFrame):
         self.ctl.seek(self._duration() * self.seek.value() / 1000)
 
     def _on_state(self, playing: bool):
-        self.play_btn.setText("⏸" if playing else "▶")
+        self._set_playing(playing)
+
+    def _set_playing(self, playing: bool):
+        self.playing = playing
+        self.play_btn.setIcon(self._pause_icon if playing else self._play_icon)
+        self.play_btn.setToolTip("Pause (Space)" if playing else "Play (Space)")
+
+    def _on_loop(self, on: bool):
+        self.ctl.engine.loop = on
+        self.loop_btn.setText("Loop on" if on else "Loop off")
+        self.loop_btn.setToolTip("Looping the current song: click to turn off" if on
+                                 else "Loop the current song: click to turn on")
