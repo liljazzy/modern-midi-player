@@ -4,6 +4,9 @@ import tempfile
 import time
 import unittest
 
+# keep the engine's idle-note diagnostic log out of the real profile
+os.environ["LOCALAPPDATA"] = tempfile.mkdtemp()
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from midiplayer import midifile                      # noqa: E402
@@ -124,6 +127,17 @@ class EngineTests(unittest.TestCase):
             pedal = [i for i, m in enumerate(self.rec.messages) if m[0] == 0xB0 | ch and m[1] == 64 and m[2] == 0]
             off = [i for i, m in enumerate(self.rec.messages) if m[0] == 0xB0 | ch and m[1] == 123]
             self.assertTrue(pedal and off and pedal[0] < off[0], f"ch {ch}: pedal up before all-notes-off")
+
+    def test_even_dynamics_keeps_ghost_notes_quiet(self):
+        from midiplayer.engine import even_velocity
+        self.assertEqual(even_velocity(127), 103)
+        self.assertEqual(even_velocity(80), 80)
+        self.assertEqual(even_velocity(40), 60)
+        self.assertEqual([even_velocity(v) for v in (1, 5, 23)], [1, 5, 23])   # never made audible
+        self.eng.even_dynamics = True
+        with self.eng.lock:
+            self.eng._dispatch(bytes([0x90, 60, 5]))
+        self.assertEqual(self.notes_on(0)[-1][2], 5)
 
     def test_active_notes_for_piano(self):
         self.eng.set_transpose(2)

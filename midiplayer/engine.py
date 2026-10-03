@@ -13,9 +13,11 @@ channel mixer, which implements:
 from __future__ import annotations
 
 import bisect
+import os
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
@@ -31,6 +33,18 @@ def _is_reset_sysex(d: bytes) -> bool:
     if len(d) >= 8 and d[1] == 0x43 and d[3] == 0x4C and d[4:7] == b"\x00\x00\x7E":  # XG reset
         return True
     return False
+
+
+GHOST_VELOCITY = 24     # notes below this are deliberate near-silent "ghost" notes: leave them alone
+
+
+def even_velocity(vel: int) -> int:
+    """Halve the distance from 80 (24..127 -> 52..103) so loud and soft notes sit closer together
+    (a SoundFont's velocity curve is steep, so wide-ranging files sound jumpy). Ghost notes are
+    left as they are - lifting them would make hidden notes in the file suddenly audible."""
+    if vel < GHOST_VELOCITY:
+        return vel
+    return 80 + (vel - 80) // 2
 
 
 DEFAULTS = {"volume": 100, "pan": 64, "reverb": 40, "chorus": 0, "expression": 127}
@@ -344,6 +358,8 @@ class Engine:
 
     # ============================================================ internals
     def _send(self, msg: bytes):
+        if len(msg) == 3 and msg[0] & 0xF0 == 0x90 and msg[2] > 0 and not self.playing:
+            self._log_idle_note(msg)
         try:
             self.backend.send(msg)
         except Exception as exc:  # never let a device error kill playback
@@ -352,6 +368,22 @@ class Engine:
                     self.on_error(str(exc))
                 except Exception:
                     pass
+
+    def _log_idle_note(self, msg: bytes):
+        """Diagnostic: a note started while nothing is playing - record who sent it."""
+        try:
+            base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+            folder = os.path.join(base, "ModernMidiPlayer")
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(folder, "idle-notes.log")
+            if os.path.exists(path) and os.path.getsize(path) > 200_000:
+                return
+            stack = "".join(traceback.format_stack(limit=10)[:-1])
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} ch={(msg[0] & 15) + 1} pitch={msg[1]} vel={msg[2]} "
+                        f"thread={threading.current_thread().name} pos={self.song_pos:.2f}/{self.duration:.2f}\n{stack}\n")
+        except Exception:
+            pass
 
     def _volume_out(self, ch: int) -> int:
         cs = self.channels[ch]
@@ -469,9 +501,7 @@ class Engine:
             cs.active.setdefault(p, []).append(out)
             vel = d[2]
             if self.even_dynamics:
-                # halve the distance from 80: 1..127 -> 40..103 (a SoundFont's velocity
-                # curve is steep, so wide-ranging files sound jumpy)
-                vel = 80 + (vel - 80) // 2
+                vel = even_velocity(vel)
             self._send(bytes([st, out, vel]))
             lvl = (vel / 127.0) * min(1.0, self._volume_out(ch) / 100.0)
             if lvl > cs.level:

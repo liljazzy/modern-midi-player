@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.5
+- The popped-out piano stays on top of other windows.
+- "Even out note volumes" no longer lifts very quiet ghost notes (velocity below 24), which made hidden notes in some files audible as stray quiet notes.
+- Diagnostic: notes that start while nothing is playing are logged to %LOCALAPPDATA%\ModernMidiPlayer\idle-notes.log to help track down stray sounds.
+
 ## 1.1.4
 - Piano keyboard that lights up the notes being played, coloured by MIDI channel. Show or hide it with **View ▸ Show piano** (Ctrl+K).
 - The piano can be popped out into its own window (drag or double-click its title, or **View ▸ Pop piano out / dock it**) and docked back.

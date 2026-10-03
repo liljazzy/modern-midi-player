@@ -90,6 +90,7 @@ class MainWindow(QMainWindow):
                                     QDockWidget.DockWidgetClosable)
         self.piano_dock.setAllowedAreas(Qt.TopDockWidgetArea | Qt.BottomDockWidgetArea)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.piano_dock)
+        self.piano_dock.topLevelChanged.connect(self._piano_floating_changed)
 
         # ---- status bar
         self.out_label = QLabel("")
@@ -604,6 +605,14 @@ class MainWindow(QMainWindow):
             "Mixer / channels\n"
             "Right-click S\tSolo only this channel\n"
             "Double-click fader/knob\tReset"))
+
+    def _piano_floating_changed(self, floating: bool):
+        """A popped-out piano stays above other windows (even other apps)."""
+        d = self.piano_dock
+        was_visible = d.isVisible()
+        d.setWindowFlag(Qt.WindowStaysOnTopHint, floating)
+        if was_visible:
+            d.show()      # changing window flags hides the window
 
     def _set_even_dynamics(self, on: bool):
         self.engine.even_dynamics = on

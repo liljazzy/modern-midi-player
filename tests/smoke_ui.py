@@ -9,6 +9,9 @@ import sys
 import tempfile
 import wave
 
+# keep the engine's idle-note diagnostic log out of the real profile
+os.environ["LOCALAPPDATA"] = tempfile.mkdtemp()
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "fakeqt"))
 sys.path.insert(0, os.path.dirname(HERE))
