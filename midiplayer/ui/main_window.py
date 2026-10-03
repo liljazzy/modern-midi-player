@@ -607,10 +607,18 @@ class MainWindow(QMainWindow):
             "Double-click fader/knob\tReset"))
 
     def _piano_floating_changed(self, floating: bool):
-        """A popped-out piano stays above other windows (even other apps)."""
+        """A popped-out piano is a normal top-level window (so screen recorders such as OBS list it as
+        its own window - Qt's default "tool window" is skipped by them) and stays above other windows."""
         d = self.piano_dock
         was_visible = d.isVisible()
-        d.setWindowFlag(Qt.WindowStaysOnTopHint, floating)
+        flags = d.windowFlags()
+        if floating:
+            flags = (flags & ~Qt.WindowType_Mask) | Qt.Window | Qt.WindowStaysOnTopHint
+            d.setWindowTitle("Modern MIDI Player - Piano")
+        else:
+            flags &= ~Qt.WindowStaysOnTopHint
+            d.setWindowTitle("Piano")
+        d.setWindowFlags(flags)
         if was_visible:
             d.show()      # changing window flags hides the window
 

@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.1.6
+- The popped-out piano is now a normal window titled "Modern MIDI Player - Piano", so screen recorders such as OBS can capture it on its own (Window Capture). It still stays on top.
+
 ## 1.1.5
 - The popped-out piano stays on top of other windows.
 - "Even out note volumes" no longer lifts very quiet ghost notes (velocity below 24), which made hidden notes in some files audible as stray quiet notes.
