@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.4
+- Piano keyboard that lights up the notes being played, coloured by MIDI channel. Show or hide it with **View ▸ Show piano** (Ctrl+K).
+- The piano can be popped out into its own window (drag or double-click its title, or **View ▸ Pop piano out / dock it**) and docked back.
+
 ## 1.1.3
 - New **Playback ▸ Even out note volumes** (on by default): narrows the gap between very loud and very quiet notes.
 - Fixed notes that kept ringing after a song ended or was stopped/paused when the file leaves the sustain pedal down.

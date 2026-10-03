@@ -18,6 +18,7 @@ class Controller(QObject):
     playStateChanged = Signal(bool)
     positionChanged = Signal(float)       # seconds (emitted ~30 Hz)
     levels = Signal(list)                 # 16 floats (~30 Hz)
+    activeNotes = Signal(object)          # {pitch: channel} of sounding notes (~30 Hz, on change)
     programsChanged = Signal()            # file-driven program change seen
     finished = Signal()                   # emitted in GUI thread
     engineError = Signal(str)
@@ -30,6 +31,7 @@ class Controller(QObject):
         engine.on_error = self.engineError.emit
         self._last_playing = False
         self._last_programs: List[int] = [0] * 16
+        self._last_active: dict = {}
         self._reload_timer = QTimer(self)
         self._reload_timer.setSingleShot(True)
         self._reload_timer.setInterval(120)
@@ -145,6 +147,10 @@ class Controller(QObject):
         eng = self.engine
         self.positionChanged.emit(eng.position())
         self.levels.emit(eng.take_levels())
+        active = eng.active_notes()
+        if active != self._last_active:
+            self._last_active = active
+            self.activeNotes.emit(active)
         p = eng.is_playing()
         if p != self._last_playing:
             self._last_playing = p

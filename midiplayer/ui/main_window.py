@@ -19,6 +19,7 @@ from ..song import Song
 from .controller import Controller
 from .editor_view import EditorView
 from .mixer_view import MixerView
+from .piano_strip import PianoStrip
 from .player_view import PlayerView
 from .playlist_view import MIDI_FILTER, PlaylistView
 from .transport import TransportBar
@@ -65,6 +66,9 @@ class MainWindow(QMainWindow):
         cl.addWidget(self.transport)
         self.setCentralWidget(central)
 
+        self.setCorner(Qt.BottomRightCorner, Qt.RightDockWidgetArea)    # playlist keeps its full height
+        self.setCorner(Qt.TopRightCorner, Qt.RightDockWidgetArea)
+
         # ---- playlist dock
         self.playlist_view = PlaylistView(self.playlist)
         self.dock = QDockWidget("Playlist", self)
@@ -75,6 +79,17 @@ class MainWindow(QMainWindow):
         self.dock.setTitleBarWidget(QWidget())
         self.dock.setMinimumWidth(300)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock)
+
+        # ---- piano dock: docked under the transport bar, or drag / double-click its title to pop it out
+        self.piano = PianoStrip()
+        self.ctl.activeNotes.connect(self.piano.set_active)
+        self.piano_dock = QDockWidget("Piano", self)
+        self.piano_dock.setObjectName("pianoDock")
+        self.piano_dock.setWidget(self.piano)
+        self.piano_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable |
+                                    QDockWidget.DockWidgetClosable)
+        self.piano_dock.setAllowedAreas(Qt.TopDockWidgetArea | Qt.BottomDockWidgetArea)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.piano_dock)
 
         # ---- status bar
         self.out_label = QLabel("")
@@ -142,6 +157,11 @@ class MainWindow(QMainWindow):
         tog.setText("Show playlist")
         tog.setShortcut("Ctrl+L")
         v.addAction(tog)
+        pt = self.piano_dock.toggleViewAction()
+        pt.setText("Show piano")
+        pt.setShortcut("Ctrl+K")
+        v.addAction(pt)
+        self._act(v, "Pop piano out / dock it", None, lambda: self.piano_dock.setFloating(not self.piano_dock.isFloating()))
 
         h = mb.addMenu("&Help")
         self._act(h, "Keyboard shortcuts", "F1", self.show_shortcuts)

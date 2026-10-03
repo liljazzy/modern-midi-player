@@ -125,6 +125,16 @@ class EngineTests(unittest.TestCase):
             off = [i for i, m in enumerate(self.rec.messages) if m[0] == 0xB0 | ch and m[1] == 123]
             self.assertTrue(pedal and off and pedal[0] < off[0], f"ch {ch}: pedal up before all-notes-off")
 
+    def test_active_notes_for_piano(self):
+        self.eng.set_transpose(2)
+        with self.eng.lock:
+            self.eng._dispatch(bytes([0x91, 60, 90]))
+            self.eng._dispatch(bytes([0x99, 42, 90]))      # drums are not shown on the piano
+        self.assertEqual(self.eng.active_notes(), {62: 1})
+        with self.eng.lock:
+            self.eng._dispatch(bytes([0x81, 60, 0]))
+        self.assertEqual(self.eng.active_notes(), {})
+
     def test_mute_and_solo(self):
         self.eng.set_mute(9, True)
         self.play_through()

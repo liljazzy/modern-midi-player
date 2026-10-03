@@ -319,6 +319,18 @@ class Engine:
                 cs.level = 0.0
             return out
 
+    def active_notes(self) -> Dict[int, int]:
+        """Sounding pitches (after transpose) -> channel; drums are left out."""
+        with self.lock:
+            out: Dict[int, int] = {}
+            for ch, cs in enumerate(self.channels):
+                if ch == DRUM_CHANNEL:
+                    continue
+                for pitches in cs.active.values():
+                    for p in pitches:
+                        out[p] = ch
+            return out
+
     def send_direct(self, msg: bytes):
         """Send a message straight to the output (e.g. note preview)."""
         with self.lock:
