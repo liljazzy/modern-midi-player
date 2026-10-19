@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.7
+- **Piano effects:** the piano keyboard can show particle effects - Sparks, Embers, Bubbles, Confetti and Stars - each driven by simple physics (gravity, bouncing off the keys, bubbles that float up and pop, confetti that flutters down and lands, embers that rise and linger). Open **View ▸ Piano effects…** to choose the type and tune the amount, size, speed, lifetime, gravity, bounce, glow, colour (channel / rainbow / one colour) and height, with a live preview. **View ▸ Piano particles** switches them on or off.
+- The effects are **off while the piano is docked** in the window and **on when it is popped out**. A setting lets you also show them while docked.
+- **Popped-out piano is now its own transparent window** - no frame or background, just the keys and the particles - so it can be captured on its own (e.g. in OBS). Drag the keys to move it, drag its left / right edge to resize it, right-click for options, and it remembers where you left it.
+- **Docking back:** double-click it, use the right-click menu, or drag it onto the top or bottom of the main window (a hint shows where it will go). The piano can be docked above the tabs or below the transport bar, and remembers the side.
+- The docked piano has a **Pop out** button on its title bar.
+
 ## 1.1.6
 - The popped-out piano is now a normal window titled "Modern MIDI Player - Piano", so screen recorders such as OBS can capture it on its own (Window Capture). It still stays on top.
 

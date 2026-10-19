@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import os
 import wave
+from dataclasses import replace
 from typing import List, Optional
 
-from PySide6.QtCore import QByteArray, QSettings, Qt, QTimer
+from PySide6.QtCore import QByteArray, QRect, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QLabel, QMainWindow, QMessageBox,
                                QProgressDialog, QTabWidget, QVBoxLayout, QWidget)
@@ -19,7 +20,9 @@ from ..song import Song
 from .controller import Controller
 from .editor_view import EditorView
 from .mixer_view import MixerView
-from .piano_strip import PianoStrip
+from .fx_dialog import PianoFxDialog
+from .piano_strip import FxConfig, PianoStrip
+from .piano_window import DockHint, DockTitle, PianoWindow
 from .player_view import PlayerView
 from .playlist_view import MIDI_FILTER, PlaylistView
 from .transport import TransportBar
@@ -80,17 +83,30 @@ class MainWindow(QMainWindow):
         self.dock.setMinimumWidth(300)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock)
 
-        # ---- piano dock: docked under the transport bar, or drag / double-click its title to pop it out
+        # ---- piano: docked under the transport bar, or popped out into its own frameless, transparent window
         self.piano = PianoStrip()
         self.ctl.activeNotes.connect(self.piano.set_active)
         self.piano_dock = QDockWidget("Piano", self)
         self.piano_dock.setObjectName("pianoDock")
         self.piano_dock.setWidget(self.piano)
-        self.piano_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable |
-                                    QDockWidget.DockWidgetClosable)
+        self.piano_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable)
         self.piano_dock.setAllowedAreas(Qt.TopDockWidgetArea | Qt.BottomDockWidgetArea)
+        title = DockTitle()
+        title.popRequested.connect(self.pop_out_piano)
+        title.hideRequested.connect(self.piano_dock.hide)
+        self.piano_dock.setTitleBarWidget(title)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.piano_dock)
-        self.piano_dock.topLevelChanged.connect(self._piano_floating_changed)
+        self.piano_popped = False
+        self.piano_window = PianoWindow()
+        self.piano_window.on_top = self.settings.value("pianoOnTop", True, bool)
+        self.piano_window.dockRequested.connect(self.dock_piano)
+        self.piano_window.effectsRequested.connect(self.configure_piano_fx)
+        self.dock_hint = DockHint()                   # shown while the popped-out piano is dragged over this window
+        self.piano_window.dragMoved.connect(self._piano_drag_moved)
+        self.piano_window.dragFinished.connect(self._piano_drag_finished)
+        self.piano_window.onTopChanged.connect(lambda on: self.settings.setValue("pianoOnTop", on))
+        self.piano_window.shownChanged.connect(lambda _=None: self._sync_piano_action())
+        self.piano_dock.visibilityChanged.connect(lambda _=None: self._sync_piano_action())
 
         # ---- status bar
         self.out_label = QLabel("")
@@ -158,11 +174,20 @@ class MainWindow(QMainWindow):
         tog.setText("Show playlist")
         tog.setShortcut("Ctrl+L")
         v.addAction(tog)
-        pt = self.piano_dock.toggleViewAction()
-        pt.setText("Show piano")
-        pt.setShortcut("Ctrl+K")
-        v.addAction(pt)
-        self._act(v, "Pop piano out / dock it", None, lambda: self.piano_dock.setFloating(not self.piano_dock.isFloating()))
+        self.piano_action = QAction("Show piano", self)
+        self.piano_action.setShortcut("Ctrl+K")
+        self.piano_action.setCheckable(True)
+        self.piano_action.setChecked(True)
+        self.piano_action.toggled.connect(self._show_piano)
+        v.addAction(self.piano_action)
+        self.piano.set_fx(FxConfig.from_json(self.settings.value("pianoFx", "", str)))
+        self.fx_toggle = QAction("Piano particles", self)
+        self.fx_toggle.setCheckable(True)
+        self.fx_toggle.setChecked(self.piano.fx.enabled)
+        self.fx_toggle.toggled.connect(self._toggle_piano_fx)
+        v.addAction(self.fx_toggle)
+        self._act(v, "Piano effects…", None, self.configure_piano_fx)
+        self._act(v, "Pop piano out / dock it", None, lambda: self.dock_piano() if self.piano_popped else self.pop_out_piano())
 
         h = mb.addMenu("&Help")
         self._act(h, "Keyboard shortcuts", "F1", self.show_shortcuts)
@@ -571,6 +596,11 @@ class MainWindow(QMainWindow):
         st = self.settings.value("windowState")
         if isinstance(st, QByteArray):
             self.restoreState(st)
+        if self.piano_dock.isFloating():                              # (older saved layouts left it floating)
+            self.piano_dock.setFloating(False)
+            self.settings.setValue("pianoPopped", True)
+        if self.settings.value("pianoPopped", False, bool):          # it was popped out last time
+            QTimer.singleShot(0, self.pop_out_piano)
         pl = self.settings.value("playlist", "", str)
         if pl:
             self.playlist.from_json(pl)
@@ -606,21 +636,102 @@ class MainWindow(QMainWindow):
             "Right-click S\tSolo only this channel\n"
             "Double-click fader/knob\tReset"))
 
-    def _piano_floating_changed(self, floating: bool):
-        """A popped-out piano is a normal top-level window (so screen recorders such as OBS list it as
-        its own window - Qt's default "tool window" is skipped by them) and stays above other windows."""
-        d = self.piano_dock
-        was_visible = d.isVisible()
-        flags = d.windowFlags()
-        if floating:
-            flags = (flags & ~Qt.WindowType_Mask) | Qt.Window | Qt.WindowStaysOnTopHint
-            d.setWindowTitle("Modern MIDI Player - Piano")
+    def _save_piano_fx(self):
+        self.settings.setValue("pianoFx", self.piano.fx.to_json())
+
+    def _toggle_piano_fx(self, on: bool):
+        self.piano.set_fx(replace(self.piano.fx, enabled=on))
+        self._save_piano_fx()
+
+    def configure_piano_fx(self):
+        dlg = PianoFxDialog(self.piano, self)
+        if dlg.exec():
+            self._save_piano_fx()
+        self.fx_toggle.blockSignals(True)
+        self.fx_toggle.setChecked(self.piano.fx.enabled)
+        self.fx_toggle.blockSignals(False)
+
+    def pop_out_piano(self):
+        """Move the piano into its own frameless, transparent window: just the keys and the particle effects."""
+        if self.piano_popped:
+            return
+        self.piano_popped = True
+        self.piano_window.take(self.piano)
+        self.piano.set_popped(True)                   # effects on (unless switched off), no background
+        geo = self.settings.value("pianoWindowGeometry")
+        if isinstance(geo, QByteArray) and self.piano_window.restoreGeometry(geo):
+            self.piano_window.setFixedHeight(self.piano.height())
         else:
-            flags &= ~Qt.WindowStaysOnTopHint
-            d.setWindowTitle("Piano")
-        d.setWindowFlags(flags)
-        if was_visible:
-            d.show()      # changing window flags hides the window
+            g = self.frameGeometry()
+            self.piano_window.resize(max(360, min(1100, int(g.width() * 0.7))), self.piano.height())
+            self.piano_window.move(g.left() + 24, g.bottom() - self.piano.height() - 60)
+        self.piano_dock.hide()
+        self.piano_window.show()
+        self.settings.setValue("pianoPopped", True)
+        self._sync_piano_action()
+
+    def dock_piano(self, area=None):
+        """Put the piano back in the main window - at the top or bottom if asked, else where it was last docked."""
+        if not self.piano_popped:
+            return
+        if area in (Qt.TopDockWidgetArea, Qt.BottomDockWidgetArea):
+            self.addDockWidget(area, self.piano_dock)
+        self.piano_popped = False
+        self.dock_hint.hide()
+        self.settings.setValue("pianoWindowGeometry", self.piano_window.saveGeometry())
+        self.settings.setValue("pianoPopped", False)
+        strip = self.piano_window.release()
+        self.piano_window.hide()
+        self.piano_dock.setWidget(strip)
+        strip.show()
+        self.piano.set_popped(False)                  # effects off again, background back
+        self.piano_dock.show()
+        self._sync_piano_action()
+
+    def _dock_zones(self) -> dict:
+        """Where letting go of the dragged piano docks it: a band along the top and along the bottom of this
+        window (global coordinates) -> the dock area it goes to. Empty while the window is hidden / minimised."""
+        if not self.isVisible() or self.isMinimized():
+            return {}
+        g = self.frameGeometry()
+        band = min(150, g.height() // 3)
+        return {Qt.TopDockWidgetArea: QRect(g.left(), g.top(), g.width(), band),
+                Qt.BottomDockWidgetArea: QRect(g.left(), g.bottom() - band + 1, g.width(), band)}
+
+    def _zone_at(self, pos):
+        for area, rect in self._dock_zones().items():
+            if rect.contains(pos):
+                return area, rect
+        return None, None
+
+    def _piano_drag_moved(self, pos):
+        area, zone = self._zone_at(pos)
+        if zone is None:
+            self.dock_hint.hide()
+            return
+        self.dock_hint.set_text("Release to dock the piano at the top" if area == Qt.TopDockWidgetArea
+                                else "Release to dock the piano at the bottom")
+        if self.dock_hint.geometry() != zone:
+            self.dock_hint.setGeometry(zone)
+        if not self.dock_hint.isVisible():
+            self.dock_hint.show()
+
+    def _piano_drag_finished(self, pos):
+        self.dock_hint.hide()
+        area, zone = self._zone_at(pos)
+        if zone is not None:
+            self.dock_piano(area)
+
+    def _show_piano(self, on: bool):
+        (self.piano_window if self.piano_popped else self.piano_dock).setVisible(on)
+
+    def _sync_piano_action(self):
+        if not hasattr(self, "piano_action"):       # (signals can fire while the window is still being built)
+            return
+        shown = self.piano_window.isVisible() if self.piano_popped else self.piano_dock.isVisible()
+        self.piano_action.blockSignals(True)
+        self.piano_action.setChecked(bool(shown))
+        self.piano_action.blockSignals(False)
 
     def _set_even_dynamics(self, on: bool):
         self.engine.even_dynamics = on
@@ -653,6 +764,11 @@ class MainWindow(QMainWindow):
         if not self.skip_save_prompt and not self.maybe_save():
             e.ignore()
             return
+        if self.piano_popped:
+            self.settings.setValue("pianoWindowGeometry", self.piano_window.saveGeometry())
+        self.piano_window.quitting = True
+        self.dock_hint.hide()
+        self.piano_window.close()
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("windowState", self.saveState())
         self.settings.setValue("master", self.engine.master)
