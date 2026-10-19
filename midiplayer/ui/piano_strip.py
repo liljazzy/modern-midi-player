@@ -19,6 +19,8 @@ from . import theme
 LOW, HIGH = 21, 108          # A0 .. C8, the 88 keys of a piano
 KEYS_H = 76                  # height of the keyboard itself
 MAX_PARTICLES = 900
+BLACK_KEY_W = 0.62           # a black key is this share of a white key's width
+EMIT_MARGIN = 0.08           # particles start this far in from each edge of the key (share of its width)
 POP_TIME = 0.24              # how long a bubble's pop animation lasts (s)
 
 
@@ -217,6 +219,19 @@ class PianoStrip(QWidget):
         left = self._white_index.get(pitch - 1)
         return (left + 1) * kw if left is not None else -1.0
 
+    def _key_span(self, pitch: int):
+        """(left, right) edges of a key in widget pixels - the width particles are spread across when it plays:
+        a white key's full width, a (narrower) black key's width. None if the key is not on the keyboard."""
+        kw = self.width() / len(self._whites)
+        if not _is_black(pitch):
+            i = self._white_index.get(pitch)
+            return None if i is None else (i * kw, (i + 1) * kw)
+        left = self._white_index.get(pitch - 1)
+        if left is None:
+            return None
+        c, half = (left + 1) * kw, kw * BLACK_KEY_W / 2
+        return c - half, c + half
+
     # ------------------------------------------------------------- input
     def set_active(self, active: Dict[int, int]):
         self._set_notes(dict(active))
@@ -259,9 +274,12 @@ class PianoStrip(QWidget):
         return QColor(CHANNEL_COLORS[ch])
 
     def _burst(self, pitch: int, ch: int, n: int, hold: bool = False):
-        x = self._key_x(pitch)
-        if n <= 0 or x < 0 or len(self._particles) > MAX_PARTICLES or not self.effects_on():
+        span = self._key_span(pitch)
+        if n <= 0 or span is None or len(self._particles) > MAX_PARTICLES or not self.effects_on():
             return
+        lo, hi = span
+        margin = (hi - lo) * EMIT_MARGIN
+        lo, hi = lo + margin, hi - margin
         k, fx = KINDS[self.fx.kind], self.fx
         base = self._color_for(pitch, ch)
         y = self._key_top() - 1
@@ -285,7 +303,7 @@ class PianoStrip(QWidget):
                 v *= max(0.6, min(2.4, y / 110.0))
             c = QColor(base) if fx.color_mode == "rainbow" else QColor(base).lighter(random.randint(100, 150))
             p = _Particle(
-                x + random.uniform(-4, 4), y, math.cos(ang) * v, math.sin(ang) * v,
+                random.uniform(lo, hi), y, math.cos(ang) * v, math.sin(ang) * v,       # (anywhere across the key)
                 random.uniform(*k["ttl"]) * fx.life, random.uniform(*k["size"]) * fx.size, c,
                 random.uniform(0, math.tau), random.uniform(-6, 6), random.uniform(0, math.tau))
             p.clump = clump
@@ -426,7 +444,7 @@ class PianoStrip(QWidget):
             p.setBrush(QColor(CHANNEL_COLORS[ch]) if ch is not None else QColor("#e9ecf4"))
             p.drawRect(QRectF(i * kw, top, kw, KEYS_H - 2))
 
-        bw, bh = kw * 0.62, (KEYS_H - 2) * 0.62                         # black keys
+        bw, bh = kw * BLACK_KEY_W, (KEYS_H - 2) * 0.62                  # black keys
         for pitch in range(LOW, HIGH + 1):
             if not _is_black(pitch):
                 continue

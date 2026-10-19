@@ -6,13 +6,63 @@ from PySide6.QtCore import QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QPushButton, QVBoxLayout, QWidget
 
-EDGE = 7          # px at the left / right edge that resize the window
+EDGE = 12         # px wide: the resize handle along each side of the popped-out window
 MIN_WIDTH = 320
+MAX_WIDTH = 8000
+
+
+class EdgeGrip(QWidget):
+    """A resize handle running down one side (left or right) of the popped-out window.
+
+    It is almost - but not quite - invisible: a fully see-through pixel of a translucent window lets clicks fall
+    through to whatever is behind it, so the handle keeps a hair of opacity to stay grabbable. It lights up when
+    the mouse is over it or it is being dragged. Dragging changes the width from that side; the other side stays."""
+
+    def __init__(self, window, side):
+        super().__init__(window)
+        self.owner = window
+        self.side = side
+        self._start = None                 # (cursor x, window geometry) when the drag began
+        self._hover = False
+        self.setCursor(Qt.SizeHorCursor)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+
+    def enterEvent(self, _e):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, _e):
+        self._hover = False
+        self.update()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._start = (e.globalPosition().toPoint().x(), self.owner.geometry())
+            self.update()
+
+    def mouseMoveEvent(self, e):
+        if self._start is not None and (e.buttons() & Qt.LeftButton):
+            self.owner.resize_from(self.side, self._start[1], e.globalPosition().toPoint().x() - self._start[0])
+
+    def mouseReleaseEvent(self, _e):
+        self._start = None
+        self.update()
+
+    def lit(self) -> bool:
+        return self._hover or self._start is not None
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(255, 255, 255, 90 if self.lit() else 2))
+        if self.lit():                                                        # a line on the outer edge
+            x = 0 if self.side == Qt.LeftEdge else self.width() - 3
+            p.fillRect(x, 0, 3, self.height(), QColor(124, 108, 255, 235))
+        p.end()
 
 
 class PianoWindow(QWidget):
     """Own top-level window (so a screen recorder lists it as a window), no frame, transparent background.
-    Drag the keys to move it (drop it on the main window to dock it), drag its left / right edge to resize,
+    Drag the keys to move it (drop it on the main window to dock it), drag the handle on either side to resize it,
     double-click to dock it back."""
     dockRequested = Signal()          # the user wants the piano back in the main window
     dragMoved = Signal(QPoint)        # while being dragged: where the cursor is (global)
@@ -36,6 +86,8 @@ class PianoWindow(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
+        self.grip_left = EdgeGrip(self, Qt.LeftEdge)
+        self.grip_right = EdgeGrip(self, Qt.RightEdge)
 
     # ---------------------------------------------------------------- the strip
     def take(self, strip):
@@ -46,6 +98,7 @@ class PianoWindow(QWidget):
         strip.show()
         strip.heightChanged.connect(self._follow_height)
         self._follow_height(strip.height())
+        self._place_grips()
 
     def release(self):
         """Hand the strip back (it is parentless afterwards)."""
@@ -62,6 +115,29 @@ class PianoWindow(QWidget):
 
     def _follow_height(self, h: int):
         self.setFixedHeight(int(h))          # the window is exactly as tall as the keys + the particle area
+
+    # ---------------------------------------------------------------- resizing from either side
+    def _place_grips(self):
+        h = self.height()
+        self.grip_left.setGeometry(0, 0, EDGE, h)
+        self.grip_right.setGeometry(self.width() - EDGE, 0, EDGE, h)
+        self.grip_left.raise_()                # (above the piano strip)
+        self.grip_right.raise_()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._place_grips()
+
+    def resize_from(self, side, start, dx: int):
+        """Change the width from one side by *dx* px (measured from the geometry *start* the drag began with).
+        The opposite side stays where it is; the window never gets narrower than MIN_WIDTH."""
+        if side == Qt.RightEdge:
+            w = max(MIN_WIDTH, min(MAX_WIDTH, start.width() + dx))
+            x = start.x()
+        else:
+            w = max(MIN_WIDTH, min(MAX_WIDTH, start.width() - dx))
+            x = start.x() + start.width() - w
+        self.setGeometry(x, start.y(), w, self.height())
 
     # ---------------------------------------------------------------- flags
     def _apply_flags(self):
@@ -81,13 +157,6 @@ class PianoWindow(QWidget):
         self.onTopChanged.emit(on)
 
     # ---------------------------------------------------------------- mouse: move, resize, dock
-    def _edge_at(self, pos: QPoint):
-        if pos.x() < EDGE:
-            return Qt.LeftEdge
-        if pos.x() >= self.width() - EDGE:
-            return Qt.RightEdge
-        return None
-
     # Moving is done by hand (not the system's move loop) so every mouse event arrives - including the release,
     # which is what lets a drag onto the main window dock the piano.
     def mouseMoveEvent(self, e):
@@ -95,20 +164,9 @@ class PianoWindow(QWidget):
             g = e.globalPosition().toPoint()
             self.move(g - self._drag_from)
             self.dragMoved.emit(g)
-            return
-        self.setCursor(Qt.SizeHorCursor if self._edge_at(e.position().toPoint()) is not None else Qt.ArrowCursor)
 
     def mousePressEvent(self, e):
         if e.button() != Qt.LeftButton:
-            return
-        edge = self._edge_at(e.position().toPoint())
-        if edge is not None:                                                      # resizing: let the system do it
-            handle = self.windowHandle()
-            try:
-                if handle is not None:
-                    handle.startSystemResize(edge)
-            except (AttributeError, TypeError):
-                pass
             return
         self._drag_from = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
 

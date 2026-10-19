@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.8
+- **Piano effects now come from the whole key:** particles start anywhere across the width of the key being played (a white key's full width, a black key's narrower width) instead of from a single point, so the effect scales with the size of the piano.
+- **The popped-out piano can be resized from both sides.** Each side has a full-height handle (nearly invisible until you hover it); drag the left handle to widen it to the left or the right handle to widen it to the right - the opposite side stays where it is. The window keeps a minimum width, and its new size is remembered.
+
 ## 1.1.7
 - **Piano effects:** the piano keyboard can show particle effects - Sparks, Embers, Bubbles, Confetti and Stars - each driven by simple physics (gravity, bouncing off the keys, bubbles that float up and pop, confetti that flutters down and lands, embers that rise and linger). Open **View ▸ Piano effects…** to choose the type and tune the amount, size, speed, lifetime, gravity, bounce, glow, colour (channel / rainbow / one colour) and height, with a live preview. **View ▸ Piano particles** switches them on or off.
 - The effects are **off while the piano is docked** in the window and **on when it is popped out**. A setting lets you also show them while docked.
