@@ -2,3 +2,6 @@ __pycache__/
 installer/build/
 installer/cache/
 dist/
+
+# scratch screenshots from local test runs
+/*.png
