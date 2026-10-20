@@ -412,6 +412,70 @@ class RtMidiBackend(Backend):
                 self.out = None
 
 
+# ------------------------------------------------------------------ MIDI input (a keyboard / controller)
+def rtmidi_available() -> bool:
+    try:
+        import rtmidi  # type: ignore  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def list_rtmidi_inputs() -> List[str]:
+    """Names of the MIDI input devices (keyboards, controllers) - empty without python-rtmidi."""
+    try:
+        import rtmidi  # type: ignore
+    except ImportError:
+        return []
+    try:
+        m = rtmidi.MidiIn()
+        ports = m.get_ports()
+        del m
+        return ports
+    except Exception:
+        return []
+
+
+class MidiInput:
+    """A connected MIDI keyboard / controller (needs python-rtmidi). Every message it sends is passed to
+    *callback* as bytes, on the device's own thread. System-exclusive, clock and active-sensing messages are dropped."""
+
+    def __init__(self, port_name: str, callback):
+        try:
+            import rtmidi  # type: ignore
+        except ImportError as e:
+            raise BackendError("python-rtmidi is not installed") from e
+        self._in = rtmidi.MidiIn()
+        ports = self._in.get_ports()
+        if port_name not in ports:
+            self._in = None
+            raise BackendError(f"MIDI input not found: {port_name}")
+        self._callback = callback
+        self._in.ignore_types(sysex=True, timing=True, active_sense=True)
+        self._in.open_port(ports.index(port_name))
+        self._in.set_callback(self._on_message)
+        self.name = port_name
+
+    def _on_message(self, event, _data=None):
+        msg, _delta = event
+        cb = self._callback
+        if cb is not None:
+            try:
+                cb(bytes(msg))
+            except Exception:                  # never let a bad message kill the device thread
+                pass
+
+    def close(self) -> None:
+        self._callback = None
+        if self._in is not None:
+            for fn in (self._in.cancel_callback, self._in.close_port):
+                try:
+                    fn()
+                except Exception:
+                    pass
+            self._in = None
+
+
 # ------------------------------------------------------------------ helpers
 def available_outputs(soundfonts: List[str], fluid_lib: str = "") -> List[OutputInfo]:
     outs: List[OutputInfo] = []

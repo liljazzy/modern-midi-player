@@ -47,6 +47,10 @@ How to get the FluidSynth library:
 
 For a better sound, put a bigger SoundFont in `soundfonts/`, such as GeneralUser GS or FluidR3_GM, or use **Output ▸ Load SoundFont…**.
 
+## MIDI input (Input menu)
+
+Plug in a MIDI keyboard or controller and choose it under **Input**. The default is **None**, so no device is used until you pick one. What you play sounds through the current output, lights up the piano keys and sends up the piano effects. Choose **Refresh devices** after plugging something in. Your choice is remembered, and if that device isn't connected next time the input stays on **None**. Input needs `python-rtmidi`, which the installer's **MIDI port support** option installs (or `pip install python-rtmidi`).
+
 ## Keyboard shortcuts
 
 | Key | Action |
@@ -78,7 +82,7 @@ midiplayer/
   song.py       Editable song model (notes + raw events), tempo map, undo stack.
   engine.py     Real-time playback thread with a channel mixer (mute/solo/volume/pan/program overrides),
                 controller chasing on seek, speed, transpose and loop. Timing jitter is under 1 ms.
-  backends.py   FluidSynth (ctypes), WinMM (ctypes), rtmidi, null/recording outputs.
+  backends.py   FluidSynth (ctypes), WinMM (ctypes), rtmidi, null/recording outputs, MIDI keyboard input.
   playlist.py   Playlist model: shuffle without repeats, repeat modes, M3U/JSON.
   ui/           Qt views: player, mixer, piano-roll editor, playlist, transport, theme.
 ```

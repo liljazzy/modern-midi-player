@@ -12,8 +12,8 @@ from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QLabel, Q
                                QProgressDialog, QTabWidget, QVBoxLayout, QWidget)
 
 from .. import HOMEPAGE, __version__, updater
-from ..backends import (BackendError, FluidSynthBackend, NullBackend, OutputInfo, available_outputs,
-                        find_fluidsynth, find_soundfonts, open_output)
+from ..backends import (BackendError, FluidSynthBackend, MidiInput, NullBackend, OutputInfo, available_outputs,
+                        find_fluidsynth, find_soundfonts, list_rtmidi_inputs, open_output, rtmidi_available)
 from ..engine import Engine
 from ..playlist import Playlist, is_midi_file, scan_folder
 from ..song import Song
@@ -42,6 +42,9 @@ class MainWindow(QMainWindow):
         self.dirty = False
         self.from_playlist = False
         self._fail_streak = 0
+        self.input_ports: List[str] = []              # MIDI keyboards / controllers found
+        self.current_input: Optional[str] = None      # the one in use: None (the default) = no input
+        self._midi_in: Optional[MidiInput] = None
         self.outputs: List[OutputInfo] = []
         self.current_output: Optional[OutputInfo] = None
         self.skip_save_prompt = False
@@ -117,6 +120,7 @@ class MainWindow(QMainWindow):
         self._wire()
         self._restore_settings()
         self._init_output()
+        self._init_input()
         self._update_title()
         self.updates.statusMessage.connect(lambda m: self.statusBar().showMessage(m, 8000))
         QTimer.singleShot(0, self.updates.startup)
@@ -164,6 +168,7 @@ class MainWindow(QMainWindow):
         self._act(p, "Panic (all notes off)", "Ctrl+.", self.panic)
 
         self.output_menu = mb.addMenu("&Output")
+        self.input_menu = mb.addMenu("&Input")
 
         v = mb.addMenu("&View")
         self._act(v, "Player", "Ctrl+1", lambda: self.tabs.setCurrentIndex(0))
@@ -236,6 +241,68 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         info = m.addAction("Output help…")
         info.triggered.connect(self.show_output_help)
+
+    # ================================================================ input (a MIDI keyboard)
+    def _build_input_menu(self):
+        m = self.input_menu
+        m.clear()
+        grp = QActionGroup(self)
+        grp.setExclusive(True)
+        none = QAction("None", self)
+        none.setCheckable(True)
+        none.setChecked(self.current_input is None)
+        none.triggered.connect(lambda _=False: self.select_input(None))
+        grp.addAction(none)
+        m.addAction(none)
+        for name in self.input_ports:
+            a = QAction(name, self)
+            a.setCheckable(True)
+            a.setChecked(name == self.current_input)
+            a.triggered.connect(lambda _=False, n=name: self.select_input(n))
+            grp.addAction(a)
+            m.addAction(a)
+        if not self.input_ports:
+            hint = m.addAction("No MIDI input devices found" if rtmidi_available() else
+                               "MIDI input needs python-rtmidi (the installer's “MIDI port support” option)")
+            hint.setEnabled(False)
+        m.addSeparator()
+        m.addAction("Refresh devices", self.refresh_inputs)
+
+    def refresh_inputs(self):
+        self.input_ports = list_rtmidi_inputs()
+        if self.current_input is not None and self.current_input not in self.input_ports:
+            self.select_input(None, quiet=True)            # the device has been unplugged
+        self._build_input_menu()
+
+    def _init_input(self):
+        """Input is None unless the saved device is still connected."""
+        self.refresh_inputs()
+        saved = self.settings.value("inputIdent", "", str)
+        if saved and saved in self.input_ports:
+            self.select_input(saved, quiet=True)
+
+    def select_input(self, name: Optional[str], quiet: bool = False) -> bool:
+        """Use the MIDI keyboard *name* (or None for no input). What it plays goes through the current output and
+        lights up the piano."""
+        if self._midi_in is not None:
+            self._midi_in.close()
+            self._midi_in = None
+        self.engine.live_off()
+        self.current_input = None
+        ok = True
+        if name:
+            try:
+                self._midi_in = MidiInput(name, self.engine.live_message)
+                self.current_input = name
+            except Exception as e:                         # (rtmidi raises its own error types)
+                ok = False
+                if not quiet:
+                    QMessageBox.warning(self, "Input", f"Could not open “{name}”:\n{e}")
+        self.settings.setValue("inputIdent", self.current_input or "")
+        self._build_input_menu()
+        if ok and self.current_input and not quiet:
+            self.statusBar().showMessage(f"MIDI input: {self.current_input}", 6000)
+        return ok
 
     # ================================================================ wiring
     def _wire(self):
@@ -332,6 +399,7 @@ class MainWindow(QMainWindow):
             "• Any hardware or virtual MIDI port — install python-rtmidi (pip install python-rtmidi)."))
 
     def panic(self):
+        self.engine.live_off()
         self.engine.pause()
         with self.engine.lock:
             try:
@@ -773,5 +841,8 @@ class MainWindow(QMainWindow):
         self.settings.setValue("windowState", self.saveState())
         self.settings.setValue("master", self.engine.master)
         self._save_playlist()
+        if self._midi_in is not None:
+            self._midi_in.close()
+            self._midi_in = None
         self.engine.close()
         e.accept()

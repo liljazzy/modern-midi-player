@@ -250,5 +250,179 @@ class PlaylistTests(unittest.TestCase):
             self.assertEqual(len(pl3), 2)
 
 
+class _FakeMidiIn:
+    """Stands in for rtmidi.MidiIn so the input code can be tested without any MIDI hardware."""
+    ports = ["Fake Keyboard", "Other Pad"]
+    instances = []
+
+    def __init__(self):
+        self.callback = None
+        self.opened = None
+        self.ignored = None
+        _FakeMidiIn.instances.append(self)
+
+    def get_ports(self):
+        return list(_FakeMidiIn.ports)
+
+    def ignore_types(self, **kw):
+        self.ignored = kw
+
+    def open_port(self, i):
+        self.opened = i
+
+    def set_callback(self, cb):
+        self.callback = cb
+
+    def cancel_callback(self):
+        self.callback = None
+
+    def close_port(self):
+        self.opened = None
+
+    def play(self, *msg):
+        """What the device's thread does when a key is pressed."""
+        if self.callback:
+            self.callback((list(msg), 0.0))
+
+
+class LiveInputTests(unittest.TestCase):
+    """A MIDI keyboard: its notes play through the output and are tracked so the piano can show them."""
+
+    def setUp(self):
+        self.rec = RecordingBackend()
+        self.eng = Engine(self.rec)
+        self._saved = sys.modules.get("rtmidi", "absent")
+        fake = type(sys)("rtmidi")
+        fake.MidiIn = _FakeMidiIn
+        sys.modules["rtmidi"] = fake
+        _FakeMidiIn.instances.clear()
+
+    def tearDown(self):
+        self.eng.close()
+        if self._saved == "absent":
+            sys.modules.pop("rtmidi", None)
+        else:
+            sys.modules["rtmidi"] = self._saved
+
+    # ---- the engine
+    def test_notes_play_and_are_tracked(self):
+        self.eng.live_message(bytes([0x90, 60, 100]))
+        self.assertIn(bytes([0x90, 60, 100]), self.rec.messages)
+        self.assertEqual(self.eng.active_notes(), {60: 0})
+        self.eng.live_message(bytes([0x80, 60, 0]))
+        self.assertIn(bytes([0x80, 60, 0]), self.rec.messages)
+        self.assertEqual(self.eng.active_notes(), {})
+
+    def test_note_on_with_zero_velocity_is_a_note_off(self):
+        self.eng.live_message(bytes([0x91, 64, 90]))
+        self.eng.live_message(bytes([0x91, 64, 0]))
+        self.assertEqual(self.eng.active_notes(), {})
+        self.assertIn(bytes([0x81, 64, 0]), self.rec.messages)
+
+    def test_other_messages_pass_through_and_system_messages_do_not(self):
+        for msg in (bytes([0xB0, 64, 127]), bytes([0xE0, 0, 80]), bytes([0xC0, 5])):
+            self.eng.live_message(msg)
+            self.assertIn(msg, self.rec.messages)
+        n = len(self.rec.messages)
+        for msg in (bytes([0xF8]), bytes([0xFE]), bytes([0xF0, 1, 2, 0xF7]), b""):
+            self.eng.live_message(msg)
+        self.assertEqual(len(self.rec.messages), n)
+
+    def test_drums_are_not_shown_on_the_piano(self):
+        self.eng.live_message(bytes([0x99, 38, 100]))
+        self.assertEqual(self.eng.active_notes(), {})
+
+    def test_muted_channel_stays_quiet_but_can_still_release(self):
+        self.eng.set_mute(0, True)
+        self.eng.live_message(bytes([0x90, 60, 100]))
+        self.assertNotIn(bytes([0x90, 60, 100]), self.rec.messages)
+        self.assertEqual(self.eng.active_notes(), {})
+        self.eng.live_message(bytes([0x80, 60, 0]))
+        self.assertIn(bytes([0x80, 60, 0]), self.rec.messages)
+
+    def test_live_off_releases_everything_held(self):
+        self.eng.live_message(bytes([0x90, 60, 100]))
+        self.eng.live_message(bytes([0x92, 72, 100]))
+        self.eng.live_off()
+        self.assertEqual(self.eng.active_notes(), {})
+        self.assertIn(bytes([0x80, 60, 0]), self.rec.messages)
+        self.assertIn(bytes([0x82, 72, 0]), self.rec.messages)
+
+    def test_changing_the_output_forgets_held_notes(self):
+        self.eng.live_message(bytes([0x90, 60, 100]))
+        self.eng.set_backend(RecordingBackend())
+        self.assertEqual(self.eng.active_notes(), {})
+
+    def test_live_notes_show_alongside_a_playing_song(self):
+        self.eng.load(make_song(bpm=480))
+        self.eng.live_message(bytes([0x93, 80, 100]))
+        self.assertEqual(self.eng.active_notes().get(80), 3)
+
+    def test_live_notes_are_not_logged_as_stray_idle_notes(self):
+        log = os.path.join(os.environ["LOCALAPPDATA"], "ModernMidiPlayer", "idle-notes.log")
+        before = os.path.getsize(log) if os.path.exists(log) else 0
+        self.eng.live_message(bytes([0x90, 60, 100]))
+        self.assertEqual(os.path.getsize(log) if os.path.exists(log) else 0, before)
+
+    # ---- the input device
+    def test_input_ports_are_listed(self):
+        from midiplayer.backends import list_rtmidi_inputs
+        self.assertEqual(list_rtmidi_inputs(), ["Fake Keyboard", "Other Pad"])
+
+    def test_without_rtmidi_there_are_no_inputs_and_opening_fails_cleanly(self):
+        from midiplayer.backends import BackendError, MidiInput, list_rtmidi_inputs, rtmidi_available
+        sys.modules["rtmidi"] = None                         # makes "import rtmidi" fail
+        self.assertEqual(list_rtmidi_inputs(), [])
+        self.assertFalse(rtmidi_available())
+        with self.assertRaises(BackendError):
+            MidiInput("Fake Keyboard", lambda m: None)
+
+    def test_opening_an_input_forwards_its_messages(self):
+        from midiplayer.backends import MidiInput
+        got = []
+        inp = MidiInput("Other Pad", got.append)
+        dev = _FakeMidiIn.instances[-1]
+        self.assertEqual(dev.opened, 1)
+        self.assertEqual(dev.ignored, dict(sysex=True, timing=True, active_sense=True))
+        dev.play(0x90, 60, 100)
+        dev.play(0xB0, 64, 127)
+        self.assertEqual(got, [bytes([0x90, 60, 100]), bytes([0xB0, 64, 127])])
+        self.assertEqual(inp.name, "Other Pad")
+
+    def test_unknown_input_is_an_error(self):
+        from midiplayer.backends import BackendError, MidiInput
+        with self.assertRaises(BackendError):
+            MidiInput("Not Plugged In", lambda m: None)
+
+    def test_closing_an_input_stops_the_messages(self):
+        from midiplayer.backends import MidiInput
+        got = []
+        inp = MidiInput("Fake Keyboard", got.append)
+        dev = _FakeMidiIn.instances[-1]
+        inp.close()
+        self.assertIsNone(dev.callback)
+        self.assertIsNone(dev.opened)
+        inp._on_message(([0x90, 60, 100], 0.0))              # (a late message from the device's thread)
+        self.assertEqual(got, [])
+
+    def test_a_keyboard_plays_through_the_engine(self):
+        from midiplayer.backends import MidiInput
+        inp = MidiInput("Fake Keyboard", self.eng.live_message)
+        dev = _FakeMidiIn.instances[-1]
+        dev.play(0x90, 67, 90)
+        self.assertEqual(self.eng.active_notes(), {67: 0})
+        self.assertIn(bytes([0x90, 67, 90]), self.rec.messages)
+        dev.play(0x80, 67, 0)
+        self.assertEqual(self.eng.active_notes(), {})
+        inp.close()
+
+    def test_a_failing_callback_does_not_break_the_device(self):
+        from midiplayer.backends import MidiInput
+        def boom(msg):
+            raise RuntimeError("bad")
+        MidiInput("Fake Keyboard", boom)
+        _FakeMidiIn.instances[-1].play(0x90, 60, 100)         # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

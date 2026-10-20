@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.2.0
+- **MIDI input:** a new **Input** menu lets you choose a MIDI keyboard or controller. The default is **None**. What you play sounds through the current output, lights up the piano keys and sends up the piano effects. It respects muted channels, is remembered between runs (and falls back to None if the device isn't connected), and **Refresh devices** finds newly plugged-in keyboards. Needs python-rtmidi - the installer's "MIDI port support" option installs it.
+
 ## 1.1.9
 - **Sparks pop:** about a third of the sparks pop part-way through their flight - a quick flash and a burst of small sparks.
 - **Stars shimmer away:** a star now shimmers away (flickers, shrinks and sheds glitter) when it reaches the top of the effect area or at a random point in its life, instead of just fading.

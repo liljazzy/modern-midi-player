@@ -110,6 +110,7 @@ class Engine:
         self.transpose = 0
         self.loop = False
         self.even_dynamics = False      # squeeze note velocities toward the middle at playback time
+        self.live: Dict[tuple, int] = {}   # notes held on a connected MIDI keyboard: (channel, pitch) -> velocity
         self.events: List[PlaybackEvent] = []
         self.times: List[float] = []
         self.duration = 0.0
@@ -217,6 +218,7 @@ class Engine:
             except Exception:
                 pass
             self.backend = backend
+            self.live.clear()                                # (notes held on the old output are gone with it)
             try:
                 old.close()
             except Exception:
@@ -334,7 +336,7 @@ class Engine:
             return out
 
     def active_notes(self) -> Dict[int, int]:
-        """Sounding pitches (after transpose) -> channel; drums are left out."""
+        """Sounding pitches (after transpose) -> channel, including notes held on a MIDI keyboard; drums are left out."""
         with self.lock:
             out: Dict[int, int] = {}
             for ch, cs in enumerate(self.channels):
@@ -343,7 +345,34 @@ class Engine:
                 for pitches in cs.active.values():
                     for p in pitches:
                         out[p] = ch
+            for ch, p in self.live:
+                if ch != DRUM_CHANNEL:
+                    out[p] = ch
             return out
+
+    def live_message(self, msg: bytes):
+        """A message from a connected MIDI keyboard: play it now through the current output, and remember which notes
+        are held so the piano can show them. Safe to call from the input device's own thread."""
+        if not msg or msg[0] >= 0xF0:
+            return                                           # system / real-time messages are not for the synth
+        hi, ch = msg[0] & 0xF0, msg[0] & 0x0F
+        if hi == 0x90 and len(msg) >= 3 and msg[2] == 0:     # a note-on with velocity 0 is a note-off
+            hi, msg = 0x80, bytes([0x80 | ch, msg[1], 0])
+        with self.lock:
+            if hi == 0x90 and len(msg) >= 3:
+                if not self.audible(ch):                     # muted / not-soloed channels stay quiet, as for a song
+                    return
+                self.live[(ch, msg[1])] = msg[2]
+            elif hi == 0x80 and len(msg) >= 2:
+                self.live.pop((ch, msg[1]), None)
+            self._send(msg, quiet=True)
+
+    def live_off(self):
+        """Release every note held on the MIDI keyboard."""
+        with self.lock:
+            for ch, p in list(self.live):
+                self._send(bytes([0x80 | ch, p, 0]), quiet=True)
+            self.live.clear()
 
     def send_direct(self, msg: bytes):
         """Send a message straight to the output (e.g. note preview)."""
@@ -357,8 +386,8 @@ class Engine:
         t.start()
 
     # ============================================================ internals
-    def _send(self, msg: bytes):
-        if len(msg) == 3 and msg[0] & 0xF0 == 0x90 and msg[2] > 0 and not self.playing:
+    def _send(self, msg: bytes, quiet: bool = False):
+        if not quiet and len(msg) == 3 and msg[0] & 0xF0 == 0x90 and msg[2] > 0 and not self.playing:
             self._log_idle_note(msg)
         try:
             self.backend.send(msg)
