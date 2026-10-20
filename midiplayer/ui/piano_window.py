@@ -6,17 +6,20 @@ from PySide6.QtCore import QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QPushButton, QVBoxLayout, QWidget
 
-EDGE = 12         # px wide: the resize handle along each side of the popped-out window
+from .piano_strip import KEYS_H, WHITE_KEYS
+
+GRIP_MIN, GRIP_MAX = 10, 60   # px: the resize handles are one white key wide, but never narrower / wider than this
 MIN_WIDTH = 320
 MAX_WIDTH = 8000
 
 
 class EdgeGrip(QWidget):
-    """A resize handle running down one side (left or right) of the popped-out window.
+    """A resize handle on one side (left or right) of the popped-out window: it sits on the end key of the keyboard
+    and is the size of a piano key - as wide as a white key, as tall as the keys.
 
-    It is almost - but not quite - invisible: a fully see-through pixel of a translucent window lets clicks fall
-    through to whatever is behind it, so the handle keeps a hair of opacity to stay grabbable. It lights up when
-    the mouse is over it or it is being dragged. Dragging changes the width from that side; the other side stays."""
+    It paints nothing until the mouse is over it (or it is being dragged), when it lights up the key. It does not need
+    any opacity to be grabbable: the key under it is solid. Dragging changes the width from that side; the other
+    side stays where it is."""
 
     def __init__(self, window, side):
         super().__init__(window)
@@ -52,18 +55,19 @@ class EdgeGrip(QWidget):
         return self._hover or self._start is not None
 
     def paintEvent(self, _e):
+        if not self.lit():
+            return                                                            # invisible unless hovered / dragged
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(255, 255, 255, 90 if self.lit() else 2))
-        if self.lit():                                                        # a line on the outer edge
-            x = 0 if self.side == Qt.LeftEdge else self.width() - 3
-            p.fillRect(x, 0, 3, self.height(), QColor(124, 108, 255, 235))
+        p.fillRect(self.rect().adjusted(0, 0, 0, -2), QColor(124, 108, 255, 110))     # the end key lights up
+        x = 0 if self.side == Qt.LeftEdge else self.width() - 3                        # with a line on the outer edge
+        p.fillRect(x, 0, 3, self.height() - 2, QColor(124, 108, 255, 240))
         p.end()
 
 
 class PianoWindow(QWidget):
     """Own top-level window (so a screen recorder lists it as a window), no frame, transparent background.
-    Drag the keys to move it (drop it on the main window to dock it), drag the handle on either side to resize it,
-    double-click to dock it back."""
+    Drag the keys to move it (drop it on the main window to dock it), drag the end key on either side to
+    resize it, double-click to dock it back."""
     dockRequested = Signal()          # the user wants the piano back in the main window
     dragMoved = Signal(QPoint)        # while being dragged: where the cursor is (global)
     dragFinished = Signal(QPoint)     # the drag ended here (global): the main window decides whether that docks it
@@ -118,9 +122,12 @@ class PianoWindow(QWidget):
 
     # ---------------------------------------------------------------- resizing from either side
     def _place_grips(self):
-        h = self.height()
-        self.grip_left.setGeometry(0, 0, EDGE, h)
-        self.grip_right.setGeometry(self.width() - EDGE, 0, EDGE, h)
+        """One on the first white key and one on the last: a key wide, and as tall as the keys (at the bottom)."""
+        gw = max(GRIP_MIN, min(GRIP_MAX, round(self.width() / WHITE_KEYS)))
+        top = max(0, self.height() - KEYS_H)
+        h = min(KEYS_H, self.height())
+        self.grip_left.setGeometry(0, top, gw, h)
+        self.grip_right.setGeometry(self.width() - gw, top, gw, h)
         self.grip_left.raise_()                # (above the piano strip)
         self.grip_right.raise_()
 

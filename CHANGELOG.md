@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.9
+- **Sparks pop:** about a third of the sparks pop part-way through their flight - a quick flash and a burst of small sparks.
+- **Stars shimmer away:** a star now shimmers away (flickers, shrinks and sheds glitter) when it reaches the top of the effect area or at a random point in its life, instead of just fading.
+- **Bubbles and confetti are 25% faster**, and there are **25% fewer bubbles**.
+- **Taller effect area:** the effect height can now go up to 600 px (was 240). Confetti and embers scale up to fill a tall area; this also fixes confetti being flung out of very tall areas.
+- **Resize handles match the piano keys:** the popped-out piano is resized by dragging its first or last key (each handle is one key wide and as tall as the keys). They are completely invisible until you hover over them, when the end key lights up.
+
 ## 1.1.8
 - **Piano effects now come from the whole key:** particles start anywhere across the width of the key being played (a white key's full width, a black key's narrower width) instead of from a single point, so the effect scales with the size of the piano.
 - **The popped-out piano can be resized from both sides.** Each side has a full-height handle (nearly invisible until you hover it); drag the left handle to widen it to the left or the right handle to widen it to the right - the opposite side stays where it is. The window keeps a minimum width, and its new size is remembered.

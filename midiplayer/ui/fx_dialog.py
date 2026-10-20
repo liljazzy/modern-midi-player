@@ -8,7 +8,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
                                QLabel, QPushButton, QSlider, QVBoxLayout, QWidget)
 
-from .piano_strip import COLOR_MODES, KINDS, FxConfig, PianoStrip
+from .piano_strip import COLOR_MODES, KINDS, MAX_HEIGHT, FxConfig, PianoStrip
 
 
 class _Slider(QWidget):
@@ -95,7 +95,7 @@ class PianoFxDialog(QDialog):
         self.life = _Slider(20, 400, int(cfg.life * 100), 0.01, "×", ch)
         self.gravity = _Slider(-100, 100, cfg.gravity, 1, "", ch)
         self.bounce = _Slider(0, 150, int(cfg.bounce * 100), 0.01, "×", ch)
-        self.height = _Slider(20, 240, cfg.height, 1, " px", ch)
+        self.height = _Slider(20, MAX_HEIGHT, cfg.height, 1, " px", ch)
         form.addRow("Amount", self.amount)
         form.addRow("Size", self.size)
         form.addRow("Speed", self.speed)

@@ -19,13 +19,25 @@ from . import theme
 LOW, HIGH = 21, 108          # A0 .. C8, the 88 keys of a piano
 KEYS_H = 76                  # height of the keyboard itself
 MAX_PARTICLES = 900
+MAX_LAUNCH = 2400            # px/s: the fastest any particle is ever launched
+MAX_HEIGHT = 600             # the tallest effect area the settings allow (px)
 BLACK_KEY_W = 0.62           # a black key is this share of a white key's width
 EMIT_MARGIN = 0.08           # particles start this far in from each edge of the key (share of its width)
 POP_TIME = 0.24              # how long a bubble's pop animation lasts (s)
+SHIMMER_TIME = 0.55          # how long a star takes to shimmer away (s)
+TOP_EDGE = 6.0               # a star this close to the top of the effect area shimmers away
 
 
 def _is_black(pitch: int) -> bool:
     return pitch % 12 in BLACK_KEYS
+
+
+WHITE_KEYS = sum(1 for _p in range(LOW, HIGH + 1) if not _is_black(_p))        # 52 white keys
+
+
+def _hscale(zone: float) -> float:
+    """How much taller than the default (110 px) the effect area is: 1 up to 110 px, then up to 6x."""
+    return max(1.0, min(6.0, zone / 110.0))
 
 
 # --------------------------------------------------------------------- config
@@ -38,7 +50,7 @@ KINDS = {
     #   (rest = bounciness, fric = sideways grip per bounce)
     #   jitter: meandering force (px/s^2) so each particle wanders on its own path (jitter_speed: it fades
     #   out while the particle is moving faster than this, so only the slow part of its flight wanders)     linger: chance a particle hangs around much longer
-    #   scale_h: lift and launch speed grow with the effect height (relative to 110 px), so the particle
+    #   scale_h: lift and launch speed grow with the effect height (relative to 110 px, up to 6x), so the particle
     #   always travels a similar share of the area however tall it is
     #   fade_top: share of the effect height, at the top, over which a particle fades out as it rises into it
     #   flicker: brightness flicker      pop: bubbles rise to a random height, then burst
@@ -52,26 +64,32 @@ KINDS = {
     #   rect_chance: share of particles drawn as long tumbling rectangles (like the confetti) instead of circles
     #   rise_var: (min, max) each particle's own lift factor, so every one rises at its own speed
     #   speed_wobble: share by which a particle's lift swells and fades over its life
+    #   pop_chance / pop_burst: share of sparks that pop at a random moment, and how many small sparks they burst into
+    #   shimmer: stars shimmer away (flicker, shrink, shed glitter) when they reach the top of the effect area or at a
+    #   random point in their life, instead of just fading
+    #   tempo: runs this effect's whole motion faster (1.25 = 25% faster; the paths and heights stay the same)
     #   cone: keeps sideways speed proportional to rising speed, so the stream opens up like a cone
     #   apex: (min, max) share of the effect height a particle peaks at - its launch speed is worked out to
-    #         hit that, so it always goes high without leaving the area (replaces speed)
+    #         hit that, so it always goes high without leaving the area (replaces speed). In a taller area the air
+    #         resistance is gentler (and gravity a little stronger), so the flight scales up with the area instead
+    #         of needing an absurd launch speed
     "sparks":   dict(label="Sparks",   burst=10, hold=0.6, speed=(140, 340), ttl=(1.1, 1.9), size=(1.6, 3.4), spread=0.7,
-                     gravity=420, buoy=0, drag=0.35, flutter=0.0,
+                     gravity=420, buoy=0, drag=0.35, flutter=0.0, pop_chance=0.3, pop_burst=(4, 7),
                      floor=True, rest=0.55, fric=0.25, shape="dot"),
     "embers":   dict(label="Embers",   burst=5,  hold=0.4,  speed=(15, 150), ttl=(1.6, 3.0), size=(2.0, 4.2), spread=0.65,
                      gravity=0, buoy=95, drag=0.65, scale_h=True, flutter=0.0, rise_var=(0.4, 1.9), speed_wobble=0.35, rect_chance=0.5,
                      jitter=60.0, linger=0.3, flicker=0.4, fade_top=0.35,
                      clumps=dict(renew=(0.35, 0.7), tight=0.12),
                      floor=False, rest=0.0, fric=0.0, shape="dot"),
-    "bubbles":  dict(label="Bubbles",  burst=4,  hold=0.25, speed=(10, 45), ttl=(6.0, 8.0), size=(3.0, 7.0), spread=0.55,
-                     gravity=0, buoy=55, drag=1.2, flutter=0.15, cone=12.0, pop=True,
+    "bubbles":  dict(label="Bubbles",  burst=3,  hold=0.1875, speed=(10, 45), ttl=(6.0, 8.0), size=(3.0, 7.0), spread=0.55,
+                     gravity=0, buoy=55, drag=1.2, flutter=0.15, cone=12.0, pop=True, tempo=1.25,
                      floor=False, rest=0.0, fric=0.0, shape="ring"),
     "confetti": dict(label="Confetti", burst=12, hold=0.5,  apex=(0.55, 0.95), ttl=(8.0, 10.0), size=(2.5, 4.5), spread=0.45,
                      gravity=130, buoy=0, drag=0.25, qdrag=0.011, rest_time=(1.0, 2.0), fade=0.6, flutter=1.0,
-                     jitter=110.0, jitter_speed=170.0,
+                     jitter=110.0, jitter_speed=170.0, tempo=1.25,
                      floor=True, rest=0.2, fric=0.55, shape="rect"),
     "stars":    dict(label="Stars",    burst=5,  hold=0.3,  speed=(60, 150), ttl=(2.2, 3.6), size=(3.0, 6.0), spread=0.5,
-                     gravity=20, buoy=25, drag=0.3, flutter=0.0,
+                     gravity=20, buoy=25, drag=0.3, flutter=0.0, shimmer=True,
                      floor=True, rest=0.6, fric=0.1, shape="star"),
 }
 COLOR_MODES = {"channel": "Channel colour", "rainbow": "Rainbow", "custom": "One colour"}
@@ -91,7 +109,7 @@ class FxConfig:
     glow: bool = True          # additive glow around each particle
     color_mode: str = "channel"
     color: str = "#ffffff"     # used by color_mode == "custom"
-    height: int = 110          # headroom above the keys (px)
+    height: int = 110          # headroom above the keys (px), up to MAX_HEIGHT
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))
@@ -125,7 +143,7 @@ class FxConfig:
         cfg.life = max(0.2, min(4.0, cfg.life))
         cfg.gravity = max(-100, min(100, cfg.gravity))
         cfg.bounce = max(0.0, min(1.5, cfg.bounce))
-        cfg.height = max(20, min(240, cfg.height))
+        cfg.height = max(20, min(MAX_HEIGHT, cfg.height))
         return cfg
 
 
@@ -135,12 +153,15 @@ class _Clump:
 
 
 class _Particle:
-    __slots__ = ("x", "y", "vx", "vy", "age", "ttl", "size", "color", "rot", "spin", "phase", "bf", "df", "pop", "popt", "slope", "landed", "clump", "rect")
+    __slots__ = ("x", "y", "vx", "vy", "age", "ttl", "size", "color", "rot", "spin", "phase", "bf", "df", "pop", "popt", "slope", "landed", "clump", "rect", "fuse", "shim", "shim_at")
 
     def __init__(self, x, y, vx, vy, ttl, size, color, rot, spin, phase):
         self.x, self.y, self.vx, self.vy = x, y, vx, vy
         self.age, self.ttl, self.size, self.color = 0.0, ttl, size, color
         self.rot, self.spin, self.phase = rot, spin, phase
+        self.fuse = 0.0                       # sparks: age at which it pops (0 = never)
+        self.shim = -1.0                      # stars: seconds into the shimmer (-1 = not yet, -2 = a plain speck)
+        self.shim_at = 0.0                    # stars: age at which it shimmers away (it also does at the top edge)
         self.rect = False                     # drawn as a long rectangle instead of a circle
         self.clump = None                     # the _Clump it travels with (embers)
         self.landed = False                   # has come to rest on the keys
@@ -294,19 +315,25 @@ class PianoStrip(QWidget):
                 # with quadratic drag a rise of H needs v0 = sqrt(g/k * (exp(2 k H) - 1)); the 1.08 allows for the
                 # linear drag too. Dividing by cos() keeps the *upward* speed (and so the height) the same at any angle.
                 height = max(20.0, y) * random.uniform(*k["apex"])
-                qd = k["qdrag"]
-                need = math.sqrt(k["gravity"] / qd * (math.exp(2.0 * qd * height * 1.08) - 1.0))
+                hs = _hscale(y)
+                qd, g = k["qdrag"] / hs, k["gravity"] * math.sqrt(hs)       # (the same scaling the simulation uses)
+                need = math.sqrt(g / qd * (math.exp(2.0 * qd * height * 1.08) - 1.0))
                 v = need / max(0.3, math.cos(off)) * fx.speed * (0.55 if hold else 1.0)
             else:
                 v = random.uniform(*k["speed"]) * fx.speed * (0.55 if hold else 1.0)
             if k.get("scale_h"):
-                v *= max(0.6, min(2.4, y / 110.0))
+                v *= max(0.6, min(6.0, y / 110.0))
+            v = min(v, MAX_LAUNCH)
             c = QColor(base) if fx.color_mode == "rainbow" else QColor(base).lighter(random.randint(100, 150))
             p = _Particle(
                 random.uniform(lo, hi), y, math.cos(ang) * v, math.sin(ang) * v,       # (anywhere across the key)
                 random.uniform(*k["ttl"]) * fx.life, random.uniform(*k["size"]) * fx.size, c,
                 random.uniform(0, math.tau), random.uniform(-6, 6), random.uniform(0, math.tau))
             p.clump = clump
+            if k.get("pop_chance") and random.random() < k["pop_chance"]:      # a few sparks pop part-way
+                p.fuse = p.ttl * random.uniform(0.25, 0.75)
+            if k.get("shimmer"):                                               # stars shimmer away at a random point
+                p.shim_at = p.ttl * random.uniform(0.35, 0.95)
             if k.get("rect_chance"):
                 p.rect = random.random() < k["rect_chance"]
             if k.get("rise_var"):
@@ -331,6 +358,28 @@ class PianoStrip(QWidget):
             self._clump_cur[pitch] = c
         return c
 
+    def _pop_spark(self, p: _Particle, k: dict, out: list):
+        """A spark pops: a quick flash and a burst of small sparks flung outwards."""
+        fx = self.fx
+        for _ in range(random.randint(*k["pop_burst"])):
+            ang = random.uniform(0, math.tau)
+            v = random.uniform(70, 170) * fx.speed
+            out.append(_Particle(p.x, p.y, p.vx * 0.4 + math.cos(ang) * v, p.vy * 0.4 + math.sin(ang) * v,
+                                 random.uniform(0.25, 0.55) * fx.life, max(0.8, p.size * 0.55), QColor(p.color).lighter(115),
+                                 random.uniform(0, math.tau), random.uniform(-6, 6), random.uniform(0, math.tau)))
+        out.append(_Particle(p.x, p.y, 0.0, 0.0, 0.1, p.size * 2.6, QColor(p.color).lighter(190), 0.0, 0.0, 0.0))     # the flash
+
+    def _sparkle(self, p: _Particle, out: list):
+        """A star starts to shimmer away: it sheds a little glitter."""
+        for _ in range(random.randint(5, 8)):
+            ang = random.uniform(0, math.tau)
+            v = random.uniform(15, 55)
+            s = _Particle(p.x + random.uniform(-3, 3), p.y + random.uniform(-3, 3), math.cos(ang) * v, math.sin(ang) * v - 12.0,
+                          random.uniform(0.35, 0.7) * self.fx.life, max(0.8, p.size * random.uniform(0.25, 0.45)),
+                          QColor(p.color).lighter(130), random.uniform(0, math.tau), random.uniform(-8, 8), random.uniform(0, math.tau))
+            s.shim = -2.0                                         # (a plain speck: it just fades)
+            out.append(s)
+
     # -------------------------------------------------------------- physics
     def _tick(self):
         now = time.perf_counter()
@@ -345,6 +394,7 @@ class PianoStrip(QWidget):
             self._timer.stop()
             return
         k, fx = KINDS[self.fx.kind], self.fx
+        dt *= k.get("tempo", 1.0)                  # (a faster effect: its whole motion runs a little quicker)
         self._t += dt
         chance = min(1.0, k["hold"] * fx.amount)
         for pitch, ch in self._active.items():
@@ -352,10 +402,14 @@ class PianoStrip(QWidget):
                 self._burst(pitch, ch, 1, hold=True)
 
         gravity = k["gravity"] + fx.gravity * 6.0        # the user's gravity slider adds (or removes) pull
+        qdrag = k.get("qdrag", 0.0)
+        if k.get("apex"):                                # (the same scaling the launch speed was worked out with)
+            hs = _hscale(self._key_top() - 1.0)
+            gravity = k["gravity"] * math.sqrt(hs) + fx.gravity * 6.0
+            qdrag /= hs
         buoy, flutter = k["buoy"], k["flutter"]
         if k.get("scale_h"):
-            buoy *= max(0.6, min(2.4, (self._key_top() - 1.0) / 110.0))
-        qdrag = k.get("qdrag", 0.0)
+            buoy *= max(0.6, min(6.0, (self._key_top() - 1.0) / 110.0))
         drag = math.exp(-k["drag"] * dt)
         floor = self._key_top() - 1.0
         rest = k["rest"] * fx.bounce
@@ -365,10 +419,21 @@ class PianoStrip(QWidget):
         jitter, pops = k.get("jitter", 0.0), k.get("pop", False)
         jspeed, cone = k.get("jitter_speed", 0.0), k.get("cone", 0.0)
         rest_time = k.get("rest_time")
+        shimmers, shim_damp = k.get("shimmer", False), math.exp(-3.0 * dt)
+        pops_on = bool(k.get("pop_chance"))
+        spawned: list = []
         alive = []
         for p in self._particles:
             p.age += dt
-            if pops:
+            if shimmers and p.shim > -1.5:                 # stars: shimmer away at the top edge or at a random point
+                if p.shim >= 0.0:
+                    p.shim += dt
+                    if p.shim >= SHIMMER_TIME:
+                        continue
+                elif p.y <= TOP_EDGE or (p.shim_at and p.age >= p.shim_at) or p.age >= p.ttl:
+                    p.shim = 0.0
+                    self._sparkle(p, spawned)
+            elif pops:
                 if p.popt >= 0.0:                          # bursting: stays put while the pop plays
                     p.popt += dt
                     if p.popt < POP_TIME:
@@ -380,6 +445,9 @@ class PianoStrip(QWidget):
                     alive.append(p)
                     continue
             elif p.age >= p.ttl:
+                continue
+            if pops_on and p.fuse and p.age >= p.fuse:     # sparks: this one pops
+                self._pop_spark(p, k, spawned)
                 continue
             lift = buoy * p.bf
             if wobble:                                     # its own lift swells and fades as it rises: speeds keep changing
@@ -401,6 +469,8 @@ class PianoStrip(QWidget):
                 ax -= qdrag * sp * p.vx
                 ay -= qdrag * sp * p.vy
             pd = drag if p.df == 1.0 else math.exp(-k["drag"] * p.df * dt)
+            if p.shim >= 0.0:
+                pd *= shim_damp                            # a shimmering star slows to a hover
             p.vx = (p.vx + ax * dt) * pd
             p.vy = (p.vy + ay * dt) * pd
             p.x += p.vx * dt
@@ -422,6 +492,8 @@ class PianoStrip(QWidget):
                 p.rot += p.spin * dt
             if -40 < p.y < height + 20 and -30 < p.x < width + 30:
                 alive.append(p)
+        room = max(0, int(MAX_PARTICLES * 1.2) - len(alive))
+        alive.extend(spawned[:room])
         self._particles = alive
         if not self._particles and not self._active:
             self._timer.stop()
@@ -476,11 +548,15 @@ class PianoStrip(QWidget):
             else:
                 life = 1.0 - q.age / q.ttl
             r = q.size * (0.4 + 0.6 * life)
+            if q.shim >= 0.0:                                               # shimmering away: flickers fast, shrinks, fades
+                t = q.shim / SHIMMER_TIME
+                life = (1.0 - t) ** 0.7 * (0.3 + 0.7 * abs(math.sin(q.shim * 42 + q.phase)))
+                r = q.size * (1.0 - 0.45 * t) * (0.85 + 0.35 * abs(math.sin(q.shim * 30 + q.phase * 2)))
             col = QColor(q.color)
             if q.popt >= 0.0:
                 self._paint_pop(p, q, col)
                 continue
-            if shape == "star":                                             # twinkle
+            if shape == "star" and q.shim < 0.0:                            # twinkle
                 life *= 0.65 + 0.35 * math.sin(q.age * 14 + q.phase)
             if fade_top:                                                    # dissolve into the top edge instead of being cut off
                 life *= max(0.0, min(1.0, q.y / (fade_top * top)))
