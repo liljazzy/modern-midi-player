@@ -88,6 +88,7 @@ class MainWindow(QMainWindow):
 
         # ---- piano: docked under the transport bar, or popped out into its own frameless, transparent window
         self.piano = PianoStrip()
+        self.piano.velocity_of = self.engine.velocity_of
         self.ctl.activeNotes.connect(self.piano.set_active)
         self.piano_dock = QDockWidget("Piano", self)
         self.piano_dock.setObjectName("pianoDock")

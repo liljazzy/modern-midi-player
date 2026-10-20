@@ -8,7 +8,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
                                QLabel, QPushButton, QSlider, QVBoxLayout, QWidget)
 
-from .piano_strip import COLOR_MODES, KINDS, MAX_HEIGHT, FxConfig, PianoStrip
+from .piano_strip import COLOR_MODES, KINDS, MAX_HEIGHT, PATTERNS, FxConfig, PianoStrip
 
 
 class _Slider(QWidget):
@@ -78,6 +78,13 @@ class PianoFxDialog(QDialog):
         self.kind.setCurrentIndex(max(0, self.kind.findData(cfg.kind)))
         form.addRow("Type", self.kind)
 
+        self.pattern = QComboBox()
+        for key, label in PATTERNS.items():
+            self.pattern.addItem(label, key)
+        self.pattern.setCurrentIndex(max(0, self.pattern.findData(cfg.pattern)))
+        self.pattern.setToolTip("The shape of each firework's burst (only used by the Fireworks effect)")
+        form.addRow("Firework pattern", self.pattern)
+
         self.mode = QComboBox()
         for key, label in COLOR_MODES.items():
             self.mode.addItem(label, key)
@@ -110,15 +117,35 @@ class PianoFxDialog(QDialog):
         self.glow = QCheckBox("Glow")
         self.glow.setChecked(cfg.glow)
         form.addRow(self.glow)
+        self.glow_amount = _Slider(0, 300, int(cfg.glow_amount * 100), 0.01, "×", ch)
+        self.glow_amount.setToolTip("How strong the glows are: around particles, above held keys, and around lightning")
+        form.addRow("Glow strength", self.glow_amount)
+        self.held_glow = QCheckBox("Held-note glow")
+        self.held_glow.setToolTip("A soft light above each key for as long as it is held")
+        self.held_glow.setChecked(cfg.held_glow)
+        form.addRow(self.held_glow)
+        self.pitch_color = QCheckBox("Pitch-to-colour")
+        self.pitch_color.setToolTip("Colour by pitch, from red (low notes) to violet (high notes), instead of the colour setting")
+        self.pitch_color.setChecked(cfg.pitch_color)
+        form.addRow(self.pitch_color)
+        self.velocity = QCheckBox("Velocity scaling")
+        self.velocity.setToolTip("Harder notes make more, bigger, faster particles (and longer lightning, wider fireworks)")
+        self.velocity.setChecked(cfg.velocity)
+        form.addRow(self.velocity)
+        self.trails = QCheckBox("Trails")
+        self.trails.setToolTip("Particles leave a short fading streak behind them")
+        self.trails.setChecked(cfg.trails)
+        form.addRow(self.trails)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.preview_btn = buttons.addButton("Preview", QDialogButtonBox.ActionRole)
         self.reset_btn = buttons.addButton("Reset", QDialogButtonBox.ResetRole)
         root.addWidget(buttons)
 
-        for w in (self.enabled, self.docked, self.glow):
+        for w in (self.enabled, self.docked, self.glow, self.held_glow, self.pitch_color, self.velocity, self.trails):
             w.toggled.connect(self._apply)
         self.mode.currentIndexChanged.connect(self._apply)
+        self.pattern.currentIndexChanged.connect(self._apply)
         self.kind.currentIndexChanged.connect(self._apply)
         self.color_btn.clicked.connect(self._pick_color)
         self.preview_btn.clicked.connect(self._preview)
@@ -133,7 +160,8 @@ class PianoFxDialog(QDialog):
             enabled=self.enabled.isChecked(), docked=self.docked.isChecked(), kind=self.kind.currentData(),
             amount=self.amount.value(), size=self.size.value(), speed=self.speed.value(),
             life=self.life.value(), gravity=int(self.gravity.value()), bounce=self.bounce.value(),
-            glow=self.glow.isChecked(),
+            glow=self.glow.isChecked(), glow_amount=self.glow_amount.value(), held_glow=self.held_glow.isChecked(), pitch_color=self.pitch_color.isChecked(),
+            velocity=self.velocity.isChecked(), trails=self.trails.isChecked(), pattern=self.pattern.currentData(),
             color_mode=self.mode.currentData(), color=self._color, height=int(self.height.value()))
 
     def _apply(self, *_):
@@ -141,7 +169,10 @@ class PianoFxDialog(QDialog):
         self._sync_enabled()                    # (after applying, so the note reflects the new setting)
 
     def _sync_enabled(self):
-        self.color_btn.setEnabled(self.mode.currentData() == "custom")
+        self.pattern.setEnabled(self.kind.currentData() == "fireworks")
+        pitch = self.pitch_color.isChecked()
+        self.mode.setEnabled(not pitch)                # (pitch-to-colour decides the colours)
+        self.color_btn.setEnabled(not pitch and self.mode.currentData() == "custom")
         on = self.strip.effects_on() if hasattr(self.strip, "effects_on") else True
         cfg_on = self.enabled.isChecked()
         self.hint_visible.setText(
@@ -176,6 +207,12 @@ class PianoFxDialog(QDialog):
         self.bounce.set_value(d.bounce)
         self.height.set_value(d.height)
         self.glow.setChecked(d.glow)
+        self.glow_amount.set_value(d.glow_amount)
+        self.held_glow.setChecked(d.held_glow)
+        self.pitch_color.setChecked(d.pitch_color)
+        self.velocity.setChecked(d.velocity)
+        self.trails.setChecked(d.trails)
+        self.pattern.setCurrentIndex(self.pattern.findData(d.pattern))
         self._apply()
 
     def reject(self):

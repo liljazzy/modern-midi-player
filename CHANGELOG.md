@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0
+- **Four new piano effects:** **Fireflies** (slow glowing dots that wander within a limited range and blink on and off), **Lightning** (several jagged, branching bolts per key), **Steam** (soft puffs in the key's own colour) and **Fireworks** (a rocket bursts into a pattern). Fireworks have a **Firework pattern** setting: Random, Peony, Ring, Heart, Star, Spiral, Double ring, Willow or Crackle.
+- **New effect options** in View > Piano effects: **Held-note glow** (a soft light above a key while it is held), **Pitch-to-colour** (red for low notes through to violet for high notes, on the keys too), **Velocity scaling** (harder notes make more, bigger, faster effects) and **Trails**.
+- **Glow strength slider:** 0x to 3x, for the particle glow, the held-note glow and the lightning glow.
+- **Sparks** now include long tumbling rectangular pieces as well as round ones.
+- **Faster effects:** painting is several times cheaper (steam, bubbles and lightning most of all), and if a computer still struggles the effects shed detail automatically (trails first, then fewer particles per note) and bring it back when there is time to spare. The glow is never dropped.
+- **Fixes:** switching between effects while notes are playing could stall the animation; the glow and steam images could be cropped to hard-edged shapes on screens with display scaling above 100%.
+
 ## 1.2.0
 - **MIDI input:** a new **Input** menu lets you choose a MIDI keyboard or controller. The default is **None**. What you play sounds through the current output, lights up the piano keys and sends up the piano effects. It respects muted channels, is remembered between runs (and falls back to None if the device isn't connected), and **Refresh devices** finds newly plugged-in keyboards. Needs python-rtmidi - the installer's "MIDI port support" option installs it.
 

@@ -111,6 +111,7 @@ class Engine:
         self.loop = False
         self.even_dynamics = False      # squeeze note velocities toward the middle at playback time
         self.live: Dict[tuple, int] = {}   # notes held on a connected MIDI keyboard: (channel, pitch) -> velocity
+        self.last_vel: Dict[int, int] = {}  # sounding pitch -> velocity of its latest note-on (the piano scales effects by it)
         self.events: List[PlaybackEvent] = []
         self.times: List[float] = []
         self.duration = 0.0
@@ -350,6 +351,10 @@ class Engine:
                     out[p] = ch
             return out
 
+    def velocity_of(self, pitch: int) -> int:
+        """Velocity of the latest note-on at *pitch* (90 if none has been seen)."""
+        return self.last_vel.get(pitch, 90)
+
     def live_message(self, msg: bytes):
         """A message from a connected MIDI keyboard: play it now through the current output, and remember which notes
         are held so the piano can show them. Safe to call from the input device's own thread."""
@@ -363,6 +368,7 @@ class Engine:
                 if not self.audible(ch):                     # muted / not-soloed channels stay quiet, as for a song
                     return
                 self.live[(ch, msg[1])] = msg[2]
+                self.last_vel[msg[1]] = msg[2]
             elif hi == 0x80 and len(msg) >= 2:
                 self.live.pop((ch, msg[1]), None)
             self._send(msg, quiet=True)
@@ -528,6 +534,7 @@ class Engine:
             p = d[1]
             out = p if ch == DRUM_CHANNEL else max(0, min(127, p + self.transpose))
             cs.active.setdefault(p, []).append(out)
+            self.last_vel[out] = d[2]
             vel = d[2]
             if self.even_dynamics:
                 vel = even_velocity(vel)

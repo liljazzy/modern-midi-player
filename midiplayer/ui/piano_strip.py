@@ -1,5 +1,6 @@
 """Piano keyboard that lights up the notes being played, coloured by MIDI channel,
-with configurable physics-driven particle effects (sparks, embers, bubbles, confetti, stars)."""
+with configurable physics-driven particle effects (sparks, embers, bubbles, confetti, stars, fireflies, lightning,
+steam, fireworks)."""
 from __future__ import annotations
 
 import json
@@ -10,7 +11,7 @@ from dataclasses import asdict, dataclass, fields
 from typing import Dict, List
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF, QRadialGradient
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from ..gm import BLACK_KEYS, CHANNEL_COLORS
@@ -25,6 +26,11 @@ BLACK_KEY_W = 0.62           # a black key is this share of a white key's width
 EMIT_MARGIN = 0.08           # particles start this far in from each edge of the key (share of its width)
 POP_TIME = 0.24              # how long a bubble's pop animation lasts (s)
 SHIMMER_TIME = 0.55          # how long a star takes to shimmer away (s)
+TRAIL_LEN = 9                # points kept behind a particle for its trail
+SPRITE = 128                 # pixels across the pre-rendered soft shapes
+SPRITE_RECT = QRectF(0, 0, SPRITE, SPRITE)
+SLOW_PAINT = 0.011           # a paint slower than this (s, smoothed) makes the effects shed detail ...
+FAST_PAINT = 0.004           # ... and one faster than this lets it come back
 TOP_EDGE = 6.0               # a star this close to the top of the effect area shimmers away
 
 
@@ -74,7 +80,7 @@ KINDS = {
     #         resistance is gentler (and gravity a little stronger), so the flight scales up with the area instead
     #         of needing an absurd launch speed
     "sparks":   dict(label="Sparks",   burst=10, hold=0.6, speed=(140, 340), ttl=(1.1, 1.9), size=(1.6, 3.4), spread=0.7,
-                     gravity=420, buoy=0, drag=0.35, flutter=0.0, pop_chance=0.3, pop_burst=(4, 7),
+                     gravity=420, buoy=0, drag=0.35, flutter=0.0, pop_chance=0.3, pop_burst=(4, 7), rect_chance=0.35,
                      floor=True, rest=0.55, fric=0.25, shape="dot"),
     "embers":   dict(label="Embers",   burst=5,  hold=0.4,  speed=(15, 150), ttl=(1.6, 3.0), size=(2.0, 4.2), spread=0.65,
                      gravity=0, buoy=95, drag=0.65, scale_h=True, flutter=0.0, rise_var=(0.4, 1.9), speed_wobble=0.35, rect_chance=0.5,
@@ -91,7 +97,28 @@ KINDS = {
     "stars":    dict(label="Stars",    burst=5,  hold=0.3,  speed=(60, 150), ttl=(2.2, 3.6), size=(3.0, 6.0), spread=0.5,
                      gravity=20, buoy=25, drag=0.3, flutter=0.0, shimmer=True,
                      floor=True, rest=0.6, fric=0.1, shape="star"),
+    # fireflies: slow glowing dots that wander on their own and blink on and off (pulse). tether: how firmly each is pulled
+    # back towards where it started; roam: the furthest (px) it can ever get from there sideways
+    "fireflies": dict(label="Fireflies", burst=3, hold=0.12, speed=(6, 26), ttl=(4.0, 7.0), size=(2.0, 3.6), spread=1.3,
+                      gravity=0, buoy=12, drag=1.1, flutter=0.0, jitter=62.0, pulse=True, halo=1.4, fade_top=0.25, tether=2.2, roam=55.0,
+                      floor=True, rest=0.3, fric=0.5, shape="dot"),
+    # lightning: a jagged bolt flashes up from the key and is gone in a fraction of a second (bolt)
+    "lightning": dict(label="Lightning", burst=3, hold=0.07, speed=(0, 0), ttl=(0.16, 0.3), size=(1.4, 2.4), spread=0.0,
+                      gravity=0, buoy=0, drag=0, flutter=0.0, bolt=True,
+                      floor=False, rest=0.0, fric=0.0, shape="bolt"),
+    # steam: big soft puffs that rise, swell (grow) and dissolve
+    "steam":     dict(label="Steam", burst=2, hold=0.22, speed=(25, 70), ttl=(2.0, 3.4), size=(7.0, 13.0), spread=0.45,
+                      gravity=0, buoy=75, drag=0.9, scale_h=True, flutter=0.0, jitter=45.0, grow=2.2, fade_top=0.4, key_color=True,
+                      floor=False, rest=0.0, fric=0.0, shape="puff"),
+    # fireworks: a rocket climbs to the top of its flight, then bursts into a ring of sparks that fall (rocket)
+    "fireworks": dict(label="Fireworks", burst=1, hold=0.015, speed=(0, 0), ttl=(5.0, 5.0), size=(2.2, 3.2), spread=0.22,
+                      gravity=260, buoy=0, drag=0.12, flutter=0.0, rocket=True, flicker=0.3, pop_burst=(3, 5),
+                      floor=True, rest=0.3, fric=0.3, shape="dot"),
 }
+PATTERNS = {"random": "Random", "peony": "Peony (round burst)", "ring": "Ring", "heart": "Heart", "star": "Star",
+            "spiral": "Spiral", "double": "Double ring", "willow": "Willow (drooping trails)", "crackle": "Crackle"}
+PATTERN_NAMES = [n for n in PATTERNS if n != "random"]
+SHAPE_DF = 14.0              # shaped bursts (heart, star, spiral, double ring) brake hard so the shape holds, then drift down
 COLOR_MODES = {"channel": "Channel colour", "rainbow": "Rainbow", "custom": "One colour"}
 
 
@@ -107,9 +134,15 @@ class FxConfig:
     gravity: int = 0           # extra pull: negative = floats up, positive = falls (-100..100)
     bounce: float = 1.0        # multiplier on how bouncy the keys are
     glow: bool = True          # additive glow around each particle
+    glow_amount: float = 1.0   # how strong the glows are (particle glow, held-note glow, lightning glow): 0 = none, 3 = very bright
     color_mode: str = "channel"
     color: str = "#ffffff"     # used by color_mode == "custom"
     height: int = 110          # headroom above the keys (px), up to MAX_HEIGHT
+    held_glow: bool = False    # a soft glow above a key for as long as it is held
+    pitch_color: bool = False  # colour by pitch (low = red ... high = violet) instead of the colour setting
+    velocity: bool = False     # harder notes make more, bigger, faster / longer effects
+    trails: bool = False       # particles leave a short fading streak behind them
+    pattern: str = "random"    # fireworks: the burst shape ("random" = a different one each time)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))
@@ -135,6 +168,8 @@ class FxConfig:
             cfg.kind = "sparks"
         if cfg.color_mode not in COLOR_MODES:
             cfg.color_mode = "channel"
+        if cfg.pattern not in PATTERNS:
+            cfg.pattern = "random"
         if not QColor(cfg.color).isValid():
             cfg.color = "#ffffff"
         cfg.amount = max(0.0, min(4.0, cfg.amount))
@@ -143,6 +178,7 @@ class FxConfig:
         cfg.life = max(0.2, min(4.0, cfg.life))
         cfg.gravity = max(-100, min(100, cfg.gravity))
         cfg.bounce = max(0.0, min(1.5, cfg.bounce))
+        cfg.glow_amount = max(0.0, min(3.0, cfg.glow_amount))
         cfg.height = max(20, min(MAX_HEIGHT, cfg.height))
         return cfg
 
@@ -153,7 +189,7 @@ class _Clump:
 
 
 class _Particle:
-    __slots__ = ("x", "y", "vx", "vy", "age", "ttl", "size", "color", "rot", "spin", "phase", "bf", "df", "pop", "popt", "slope", "landed", "clump", "rect", "fuse", "shim", "shim_at")
+    __slots__ = ("x", "y", "vx", "vy", "age", "ttl", "size", "color", "rot", "spin", "phase", "bf", "df", "pop", "popt", "slope", "landed", "clump", "rect", "fuse", "shim", "shim_at", "pts", "trail", "rocket", "power", "ox", "gf", "streak", "sprite")
 
     def __init__(self, x, y, vx, vy, ttl, size, color, rot, spin, phase):
         self.x, self.y, self.vx, self.vy = x, y, vx, vy
@@ -162,6 +198,14 @@ class _Particle:
         self.fuse = 0.0                       # sparks: age at which it pops (0 = never)
         self.shim = -1.0                      # stars: seconds into the shimmer (-1 = not yet, -2 = a plain speck)
         self.shim_at = 0.0                    # stars: age at which it shimmers away (it also does at the top edge)
+        self.ox = x                           # where it started (fireflies stay within reach of it)
+        self.gf = 1.0                         # scales gravity (fireworks: shaped bursts fall gently)
+        self.sprite = None                    # lightning: the bolt, pre-rendered
+        self.streak = False                   # always draws a trail (willow fireworks), whatever the Trails setting
+        self.pts = None                       # lightning: the bolt's polylines (a bolt has no motion)
+        self.trail = None                     # recent positions, for the trail
+        self.rocket = False                   # fireworks: climbs, then bursts at the top of its flight
+        self.power = 1.0                      # velocity scaling: how hard the note was struck (1 = normal)
         self.rect = False                     # drawn as a long rectangle instead of a circle
         self.clump = None                     # the _Clump it travels with (embers)
         self.landed = False                   # has come to rest on the keys
@@ -186,6 +230,12 @@ class PianoStrip(QWidget):
         self._white_index = {pitch: i for i, pitch in enumerate(self._whites)}
         self._particles: List[_Particle] = []
         self._clump_cur: Dict[int, _Clump] = {}   # the clump each held key is currently feeding
+        self._glow: Dict[int, list] = {}       # held-note glow: pitch -> [level 0..1, colour, strength]
+        self._sprites: Dict[tuple, QPixmap] = {}   # pre-rendered soft shapes (steam puffs, glows), by colour
+        self._paint_ema = 0.0                  # smoothed time a paint takes (s)
+        self._quality = 0                      # 0 full detail, 1 no trails, 2 also half the particles per note (glow is never shed)
+        self._q_wait = 0                       # frames to wait before the quality may change again
+        self.velocity_of = None                # callable pitch -> MIDI velocity (set by the main window)
         self._t = 0.0
         self._demo: Dict[int, int] = {}
         self._notes: Dict[int, int] = {}      # what the engine reports (the demo chord is separate)
@@ -204,6 +254,9 @@ class PianoStrip(QWidget):
         return self.fx.enabled and (self._popped or self.fx.docked)
 
     def set_fx(self, cfg: FxConfig):
+        if cfg.kind != self.fx.kind:               # a different effect: the old one's particles follow other physics - clear them
+            self._particles.clear()
+            self._clump_cur.clear()
         self.fx = cfg
         self._refresh()
 
@@ -216,6 +269,7 @@ class PianoStrip(QWidget):
         if not self.effects_on():
             self._particles.clear()
             self._clump_cur.clear()
+            self._glow.clear()
             self._timer.stop()
         else:
             self._ensure_timer()
@@ -264,6 +318,7 @@ class PianoStrip(QWidget):
         if self.effects_on():
             for pitch, ch in shown.items():
                 if pitch not in self._active and LOW <= pitch <= HIGH:
+                    self._glow_hit(pitch, ch)
                     self._burst(pitch, ch, round(KINDS[self.fx.kind]["burst"] * self.fx.amount))
         self._notes = notes
         self._active = shown
@@ -271,7 +326,7 @@ class PianoStrip(QWidget):
         self.update()
 
     def _ensure_timer(self):
-        if self.effects_on() and (self._active or self._particles) and not self._timer.isActive():
+        if self.effects_on() and (self._active or self._particles or self._glow) and not self._timer.isActive():
             self._last = time.perf_counter()
             self._timer.start()
 
@@ -286,17 +341,52 @@ class PianoStrip(QWidget):
         self._set_notes(dict(self._notes))
 
     # ---------------------------------------------------------- particles
-    def _color_for(self, pitch: int, ch: int) -> QColor:
-        mode = self.fx.color_mode
-        if mode == "custom":
-            return QColor(self.fx.color)
-        if mode == "rainbow":
-            return QColor.fromHsvF(((pitch - LOW) / 40.0 + random.uniform(-0.04, 0.04)) % 1.0, 0.75, 1.0)
+    def _base_color(self, pitch: int, ch: int) -> QColor:
+        """The colour a note's effects start from (no randomness)."""
+        fx = self.fx
+        if fx.pitch_color:                         # low = red ... high = violet, whatever the colour setting says
+            return QColor.fromHsvF(0.8 * max(0.0, min(1.0, (pitch - LOW) / (HIGH - LOW))), 0.85, 1.0)
+        if fx.color_mode == "custom":
+            return QColor(fx.color)
+        if fx.color_mode == "rainbow":
+            return QColor.fromHsvF(((pitch - LOW) / 40.0) % 1.0, 0.75, 1.0)
         return QColor(CHANNEL_COLORS[ch])
+
+    def _color_for(self, pitch: int, ch: int) -> QColor:
+        if self.fx.color_mode == "rainbow" and not self.fx.pitch_color:
+            return QColor.fromHsvF(((pitch - LOW) / 40.0 + random.uniform(-0.04, 0.04)) % 1.0, 0.75, 1.0)
+        return self._base_color(pitch, ch)
+
+    def _key_color(self, pitch: int, ch: int) -> QColor:
+        """The colour a lit key is drawn in."""
+        if self.fx.pitch_color and self.effects_on():
+            return self._base_color(pitch, ch)
+        return QColor(CHANNEL_COLORS[ch])
+
+    def _vel_norm(self, pitch: int) -> float:
+        """How hard a note was struck, relative to a normal one (1.0 at velocity 90); 1.0 when scaling is off."""
+        if not self.fx.velocity:
+            return 1.0
+        try:
+            v = self.velocity_of(pitch) if self.velocity_of else 90
+        except Exception:
+            v = 90
+        return max(0.3, min(1.4, v / 90.0))
+
+    def _glow_hit(self, pitch: int, ch: int):
+        """A key goes down: its glow takes this note's colour and strength (and keeps any level it still has)."""
+        if not self.fx.held_glow:
+            return None
+        g = self._glow.get(pitch)
+        if g is None:
+            g = self._glow[pitch] = [0.0, QColor(), 1.0]
+        g[1], g[2] = self._base_color(pitch, ch), self._vel_norm(pitch)
+        return g
 
     def _burst(self, pitch: int, ch: int, n: int, hold: bool = False):
         span = self._key_span(pitch)
-        if n <= 0 or span is None or len(self._particles) > MAX_PARTICLES or not self.effects_on():
+        limit = MAX_PARTICLES if self._quality < 2 else MAX_PARTICLES // 3
+        if n <= 0 or span is None or len(self._particles) > limit or not self.effects_on():
             return
         lo, hi = span
         margin = (hi - lo) * EMIT_MARGIN
@@ -304,6 +394,15 @@ class PianoStrip(QWidget):
         k, fx = KINDS[self.fx.kind], self.fx
         base = self._color_for(pitch, ch)
         y = self._key_top() - 1
+        vn = self._vel_norm(pitch)                                     # harder notes: more, bigger, faster
+        if not hold and fx.velocity:
+            n = max(1, round(n * vn))
+        if self._quality >= 2 and n > 1:                               # struggling: fewer particles per note
+            n = max(1, n // 2)
+        if k.get("bolt"):
+            for _ in range(n + (random.randint(0, 1) if hold else 0)):
+                self._bolt(lo, hi, y, base, hold, vn)
+            return
         for _ in range(n):
             ang = random.uniform(-math.pi / 2 - k["spread"], -math.pi / 2 + k["spread"])
             clump = None
@@ -319,17 +418,27 @@ class PianoStrip(QWidget):
                 qd, g = k["qdrag"] / hs, k["gravity"] * math.sqrt(hs)       # (the same scaling the simulation uses)
                 need = math.sqrt(g / qd * (math.exp(2.0 * qd * height * 1.08) - 1.0))
                 v = need / max(0.3, math.cos(off)) * fx.speed * (0.55 if hold else 1.0)
+            elif k.get("rocket"):
+                # the climb needs v0 = sqrt(2 g H) to peak at height H; it bursts at the peak (or the top edge)
+                height = max(20.0, y) * random.uniform(0.5, 0.92) * (0.55 if hold else 1.0)
+                g = max(60.0, k["gravity"] + fx.gravity * 6.0)
+                v = math.sqrt(2.0 * g * height) * 1.12 / max(0.3, math.cos(off)) * fx.speed
             else:
                 v = random.uniform(*k["speed"]) * fx.speed * (0.55 if hold else 1.0)
+            v *= 0.8 + 0.2 * vn
             if k.get("scale_h"):
                 v *= max(0.6, min(6.0, y / 110.0))
             v = min(v, MAX_LAUNCH)
-            c = QColor(base) if fx.color_mode == "rainbow" else QColor(base).lighter(random.randint(100, 150))
+            c = QColor(base) if (fx.color_mode == "rainbow" and not fx.pitch_color) else QColor(base).lighter(random.randint(100, 150))
             p = _Particle(
                 random.uniform(lo, hi), y, math.cos(ang) * v, math.sin(ang) * v,       # (anywhere across the key)
-                random.uniform(*k["ttl"]) * fx.life, random.uniform(*k["size"]) * fx.size, c,
+                random.uniform(*k["ttl"]) * fx.life, random.uniform(*k["size"]) * fx.size * (0.75 + 0.25 * vn), c,
                 random.uniform(0, math.tau), random.uniform(-6, 6), random.uniform(0, math.tau))
+            if k.get("key_color"):                                      # steam: exactly the colour of the key
+                p.color = QColor(self._key_color(pitch, ch))
             p.clump = clump
+            p.power = vn
+            p.rocket = bool(k.get("rocket"))
             if k.get("pop_chance") and random.random() < k["pop_chance"]:      # a few sparks pop part-way
                 p.fuse = p.ttl * random.uniform(0.25, 0.75)
             if k.get("shimmer"):                                               # stars shimmer away at a random point
@@ -347,6 +456,120 @@ class PianoStrip(QWidget):
                 p.pop = max(4.0, y - random.uniform(0.3, 0.95) * max(30.0, y - 6.0))
             self._particles.append(p)
 
+    def _bolt(self, lo: float, hi: float, y: float, color: QColor, hold: bool, vn: float):
+        """A lightning bolt: a jagged line climbing from a key, with a few short side branches."""
+        fx, k = self.fx, KINDS["lightning"]
+        x = random.uniform(lo, hi)
+        reach = min(y - 4.0, y * random.uniform(0.55, 0.97) * (0.6 if hold else 1.0) * min(1.25, 0.6 + 0.4 * vn))
+        if reach < 8.0:
+            return
+        seg = max(8.0, min(22.0, reach / 9.0))
+        width = float(self.width())
+        lines, main = [], [(x, y)]
+        cx, cy = x, y
+        lean = random.uniform(-0.4, 0.4)                                # each bolt leans its own way
+        while y - cy < reach:
+            cy -= seg * random.uniform(0.7, 1.3)
+            cx = max(0.0, min(width, cx + (random.uniform(-1.0, 1.0) * 0.9 + lean) * seg))
+            main.append((cx, cy))
+            if random.random() < 0.22 and y - cy < reach * 0.85:       # a side branch
+                side, bx, by, br = random.choice((-1, 1)), cx, cy, [(cx, cy)]
+                for _ in range(random.randint(2, 4)):
+                    bx = max(0.0, min(width, bx + side * seg * random.uniform(0.4, 1.0)))
+                    by -= seg * random.uniform(0.2, 0.7)
+                    br.append((bx, by))
+                lines.append(br)
+        lines.insert(0, main)
+        p = _Particle(x, y, 0.0, 0.0, random.uniform(*k["ttl"]) * fx.life, random.uniform(*k["size"]) * fx.size,
+                      QColor(color), 0.0, 0.0, random.uniform(0, math.tau))
+        p.pts = lines
+        self._particles.append(p)
+
+    @staticmethod
+    def _pattern_points(name: str):
+        """The offsets (as shares of the burst radius, y down) a shaped burst's sparks fly out to, as (dx, dy, ring)."""
+        pts = []
+        if name == "heart":
+            for i in range(30):
+                t = i * math.tau / 30
+                pts.append((16 * math.sin(t) ** 3 / 17.0,
+                            -(13 * math.cos(t) - 5 * math.cos(2 * t) - 2 * math.cos(3 * t) - math.cos(4 * t)) / 17.0, 0))
+        elif name == "star":
+            verts = []
+            for i in range(10):
+                a = -math.pi / 2 + i * math.pi / 5
+                r = 1.0 if i % 2 == 0 else 0.42
+                verts.append((math.cos(a) * r, math.sin(a) * r))
+            for i in range(10):
+                (x0, y0), (x1, y1) = verts[i], verts[(i + 1) % 10]
+                for j in range(3):
+                    f = j / 3.0
+                    pts.append((x0 + (x1 - x0) * f, y0 + (y1 - y0) * f, 0))
+        elif name == "spiral":
+            ph = random.uniform(0, math.tau)
+            for i in range(32):
+                r = 0.2 + 0.8 * (i // 2) / 15.0
+                a = ph + (i % 2) * math.pi + r * 2.4 * math.pi
+                pts.append((math.cos(a) * r, math.sin(a) * r, 0))
+        elif name == "double":
+            ph = random.uniform(0, math.tau)
+            pts += [(math.cos(ph + i * math.tau / 20), math.sin(ph + i * math.tau / 20), 0) for i in range(20)]
+            pts += [(0.5 * math.cos(ph + i * math.tau / 12), 0.5 * math.sin(ph + i * math.tau / 12), 1) for i in range(12)]
+        return pts
+
+    def _explode(self, p: _Particle, out: list):
+        """A rocket reaches the top of its flight and bursts - in the chosen pattern (or a random one)."""
+        fx, k = self.fx, KINDS["fireworks"]
+        name = fx.pattern if fx.pattern in PATTERN_NAMES else random.choice(PATTERN_NAMES)
+        power = 0.8 + 0.2 * p.power
+        tint = QColor(p.color)
+
+        def spark(vx, vy, ttl, size, color, df=1.0, gf=1.0, trail=False, fuse=0.0):
+            c = _Particle(p.x, p.y, vx, vy, ttl * fx.life, max(1.0, size), color, random.uniform(0, math.tau),
+                          random.uniform(-6, 6), random.uniform(0, math.tau))
+            c.df, c.gf, c.fuse = df, gf, fuse * fx.life
+            if trail:
+                c.trail, c.streak = [], True
+            out.append(c)
+
+        size = p.size * 0.7
+        if name in ("heart", "star", "spiral", "double"):
+            # brake hard so the sparks stop where the shape puts them (reach = v0 / rate), then they drift down gently
+            rate = k["drag"] * SHAPE_DF
+            reach = min(random.uniform(60, 95) * fx.speed * power, max(25.0, p.y - 6.0))
+            second = QColor.fromHsv((max(0, tint.hue()) + 55) % 360, max(120, tint.saturation()), 255)
+            for dx, dy, ring in self._pattern_points(name):
+                spark(dx * reach * rate, dy * reach * rate, random.uniform(1.3, 1.8), size,
+                      QColor(second if ring else tint).lighter(random.randint(100, 130)), df=SHAPE_DF, gf=0.5)
+        elif name == "willow":                             # long golden trails that droop
+            speed = random.uniform(70, 110) * fx.speed * power
+            gold = QColor(tint)
+            gold.setHsv(40, 150, 255)
+            for i in range(26):
+                a = i * math.tau / 26 + random.uniform(-0.1, 0.1)
+                v = speed * random.uniform(0.7, 1.0)
+                spark(math.cos(a) * v, math.sin(a) * v, random.uniform(2.2, 3.0), size * 0.9,
+                      QColor(gold).lighter(random.randint(100, 125)), df=5.0, gf=0.4, trail=True)
+        elif name == "crackle":                            # a ring of sparks that each pop again
+            speed = random.uniform(100, 150) * fx.speed * power
+            n = 14
+            for i in range(n):
+                a = i * math.tau / n + random.uniform(-0.1, 0.1)
+                v = speed * random.uniform(0.8, 1.0)
+                ttl = random.uniform(1.0, 1.4)
+                spark(math.cos(a) * v, math.sin(a) * v, ttl, size, QColor(tint).lighter(random.randint(100, 130)),
+                      fuse=ttl * random.uniform(0.45, 0.75))
+        else:                                              # "peony" a filled round burst, "ring" a single ring
+            speed = random.uniform(110, 170) * fx.speed * power
+            n = random.randint(18, 28) if name == "ring" else random.randint(34, 46)
+            ph = random.uniform(0, math.tau)
+            for i in range(n):
+                a = ph + i * math.tau / n + random.uniform(-0.05, 0.05)
+                v = speed * (random.uniform(0.85, 1.0) if name == "ring" else math.sqrt(random.uniform(0.04, 1.0)))
+                spark(math.cos(a) * v, math.sin(a) * v, random.uniform(1.0, 1.6), size,
+                      QColor(tint).lighter(random.randint(100, 135)))
+        out.append(_Particle(p.x, p.y, 0.0, 0.0, 0.12, p.size * 3.4, QColor(p.color).lighter(190), 0.0, 0.0, 0.0))     # the flash
+
     def _clump_for(self, pitch: int, new: bool = False) -> _Clump:
         """The clump a key is feeding: a new one for each note-on, and a fresh one every so often while it is held."""
         c = self._clump_cur.get(pitch)
@@ -361,7 +584,7 @@ class PianoStrip(QWidget):
     def _pop_spark(self, p: _Particle, k: dict, out: list):
         """A spark pops: a quick flash and a burst of small sparks flung outwards."""
         fx = self.fx
-        for _ in range(random.randint(*k["pop_burst"])):
+        for _ in range(random.randint(*k.get("pop_burst", (3, 5)))):
             ang = random.uniform(0, math.tau)
             v = random.uniform(70, 170) * fx.speed
             out.append(_Particle(p.x, p.y, p.vx * 0.4 + math.cos(ang) * v, p.vy * 0.4 + math.sin(ang) * v,
@@ -391,14 +614,26 @@ class PianoStrip(QWidget):
         """Advance the simulation by *dt* seconds (public so it can be driven from tests)."""
         if not self.effects_on():                  # nothing to animate while the effects are hidden
             self._particles.clear()
+            self._glow.clear()
             self._timer.stop()
             return
         k, fx = KINDS[self.fx.kind], self.fx
+        if self._glow or fx.held_glow:             # held-note glow: eases in while a key is down, fades out after
+            for pitch, ch in self._active.items():
+                if fx.held_glow:
+                    g = self._glow.get(pitch) or self._glow_hit(pitch, ch)
+                    g[0] += (1.0 - g[0]) * min(1.0, dt * 9.0)
+            for pitch in list(self._glow):
+                if pitch not in self._active or not fx.held_glow:
+                    g = self._glow[pitch]
+                    g[0] -= dt * 1.1
+                    if g[0] <= 0.01:
+                        del self._glow[pitch]
         dt *= k.get("tempo", 1.0)                  # (a faster effect: its whole motion runs a little quicker)
         self._t += dt
-        chance = min(1.0, k["hold"] * fx.amount)
+        base_chance = k["hold"] * fx.amount
         for pitch, ch in self._active.items():
-            if random.random() < chance:
+            if random.random() < min(1.0, base_chance * self._vel_norm(pitch)):
                 self._burst(pitch, ch, 1, hold=True)
 
         gravity = k["gravity"] + fx.gravity * 6.0        # the user's gravity slider adds (or removes) pull
@@ -420,11 +655,16 @@ class PianoStrip(QWidget):
         jspeed, cone = k.get("jitter_speed", 0.0), k.get("cone", 0.0)
         rest_time = k.get("rest_time")
         shimmers, shim_damp = k.get("shimmer", False), math.exp(-3.0 * dt)
-        pops_on = bool(k.get("pop_chance"))
+        tether, roam = k.get("tether", 0.0), k.get("roam", 0.0)
         spawned: list = []
         alive = []
+        trails = fx.trails
         for p in self._particles:
             p.age += dt
+            if p.pts is not None:                          # a lightning bolt: it only flashes, then goes
+                if p.age < p.ttl:
+                    alive.append(p)
+                continue
             if shimmers and p.shim > -1.5:                 # stars: shimmer away at the top edge or at a random point
                 if p.shim >= 0.0:
                     p.shim += dt
@@ -446,13 +686,13 @@ class PianoStrip(QWidget):
                     continue
             elif p.age >= p.ttl:
                 continue
-            if pops_on and p.fuse and p.age >= p.fuse:     # sparks: this one pops
+            if p.fuse and p.age >= p.fuse:                 # sparks: this one pops
                 self._pop_spark(p, k, spawned)
                 continue
             lift = buoy * p.bf
             if wobble:                                     # its own lift swells and fades as it rises: speeds keep changing
                 lift *= 1.0 + wobble * math.sin(p.age * (1.6 + p.phase * 0.3) + p.phase * 2.0)
-            ax, ay = 0.0, gravity - lift
+            ax, ay = 0.0, gravity * p.gf - lift
             if jitter:                                     # every particle meanders on its own random curve
                 jf = jitter
                 if jspeed:                                 # ...but only once it has slowed down
@@ -460,6 +700,8 @@ class PianoStrip(QWidget):
                 w1 = 2.2 + p.phase * 0.55                  # (own frequencies from its random phase) plus some noise
                 ax += jf * math.sin(p.age * w1 + p.phase * 3.0) + random.uniform(-1.0, 1.0) * jf * 0.35
                 ay += jf * 0.7 * math.cos(p.age * (w1 + 0.9) + p.phase * 5.0) + random.uniform(-1.0, 1.0) * jf * 0.25
+            if tether:                                     # fireflies: a gentle pull back towards where it started
+                ax -= (p.x - p.ox) * tether
             if flutter:                                    # leaf-like swaying while falling / rising
                 ax += math.sin(p.age * (5.0 + p.phase * 0.7) + p.phase * 2.0) * flutter * (abs(p.vy) + 20.0)
             if cone:                                       # hold the stream's shape: sideways speed follows rising speed
@@ -475,6 +717,15 @@ class PianoStrip(QWidget):
             p.vy = (p.vy + ay * dt) * pd
             p.x += p.vx * dt
             p.y += p.vy * dt
+            if roam:                                       # ...and never further away sideways than *roam* px
+                off = p.x - p.ox
+                if abs(off) > roam:
+                    p.x = p.ox + math.copysign(roam, off)
+                    if p.vx * off > 0:
+                        p.vx *= -0.3
+            if p.rocket and (p.vy > -15.0 or p.y <= TOP_EDGE + 2.0):     # at the top of its flight: burst
+                self._explode(p, spawned)
+                continue
             if k["floor"] and p.y > floor:                 # land on the key tops
                 p.y = floor
                 if p.vy > 0:
@@ -486,6 +737,13 @@ class PianoStrip(QWidget):
                         if rest_time and not p.landed:     # ...stays a while, then goes
                             p.landed = True
                             p.ttl = min(p.ttl, p.age + random.uniform(*rest_time) * fx.life)
+            if trails or p.rocket or p.streak:  # remember where it has been
+                tr = p.trail
+                if tr is None:
+                    tr = p.trail = []
+                tr.append((p.x, p.y))
+                if len(tr) > TRAIL_LEN:
+                    del tr[0]
             if k["shape"] == "rect":                       # confetti tumbles faster the faster it moves
                 p.rot += (p.spin + p.vx * 0.04) * dt
             else:
@@ -495,12 +753,32 @@ class PianoStrip(QWidget):
         room = max(0, int(MAX_PARTICLES * 1.2) - len(alive))
         alive.extend(spawned[:room])
         self._particles = alive
-        if not self._particles and not self._active:
+        if not self._particles and not self._active and not self._glow:
             self._timer.stop()
         self.update()
 
     # -------------------------------------------------------------- paint
     def paintEvent(self, _e):
+        t0 = time.perf_counter()
+        self._paint(_e)
+        if self._particles or self._glow:
+            self._adapt(time.perf_counter() - t0)
+
+    def _adapt(self, took: float):
+        """Watch how long painting takes and, if this machine is struggling, shed detail (trails first, then
+        half the particles per note; the glow stays); bring it back when there is plenty of time to spare."""
+        self._paint_ema = took if self._paint_ema == 0.0 else self._paint_ema * 0.9 + took * 0.1
+        if self._q_wait > 0:
+            self._q_wait -= 1
+            return
+        if self._paint_ema > SLOW_PAINT and self._quality < 2:
+            self._quality += 1
+            self._q_wait = 45
+        elif self._paint_ema < FAST_PAINT and self._quality > 0:
+            self._quality -= 1
+            self._q_wait = 240
+
+    def _paint(self, _e):
         p = QPainter(self)
         w, h = self.width(), self.height()
         top = self._key_top()
@@ -513,7 +791,7 @@ class PianoStrip(QWidget):
         for pitch, i in self._white_index.items():                      # white keys
             ch = self._active.get(pitch)
             p.setPen(edge)
-            p.setBrush(QColor(CHANNEL_COLORS[ch]) if ch is not None else QColor("#e9ecf4"))
+            p.setBrush(self._key_color(pitch, ch) if ch is not None else QColor("#e9ecf4"))
             p.drawRect(QRectF(i * kw, top, kw, KEYS_H - 2))
 
         bw, bh = kw * BLACK_KEY_W, (KEYS_H - 2) * 0.62                  # black keys
@@ -525,22 +803,96 @@ class PianoStrip(QWidget):
                 continue
             ch = self._active.get(pitch)
             p.setPen(edge)
-            p.setBrush(QColor(CHANNEL_COLORS[ch]).darker(115) if ch is not None else QColor("#1a1d26"))
+            p.setBrush(self._key_color(pitch, ch).darker(115) if ch is not None else QColor("#1a1d26"))
             p.drawRect(QRectF((left + 1) * kw - bw / 2, top, bw, bh))
 
+        if self._glow:
+            self._paint_glow(p, top, kw)
         if self._particles:
             self._paint_particles(p)
         p.end()
+
+    def _sprite(self, kind: str, col: QColor) -> QPixmap:
+        """A soft round shape in *col*, rendered once and then just scaled and blended (much cheaper than a gradient or a
+        big antialiased ellipse for every particle on every frame)."""
+        key = (kind, col.red() >> 3, col.green() >> 3, col.blue() >> 3)
+        pm = self._sprites.get(key)
+        if pm is None:
+            if len(self._sprites) > 400:
+                self._sprites.clear()
+            size = SPRITE
+            pm = QPixmap(size, size)
+            pm.fill(Qt.transparent)
+            q = QPainter(pm)
+            q.setRenderHint(QPainter.Antialiasing, True)
+            q.setPen(Qt.NoPen)
+            if kind == "puff":
+                grad = QRadialGradient(QPointF(size / 2, size / 2), size / 2)
+                for stop, mul in ((0.0, 1.0), (0.5, 0.5), (1.0, 0.0)):
+                    c = QColor(col)
+                    c.setAlphaF(mul)
+                    grad.setColorAt(stop, c)
+                q.setBrush(QBrush(grad))
+            elif kind == "glow":                                        # held-note glow: bright core, long soft fall-off
+                grad = QRadialGradient(QPointF(size / 2, size / 2), size / 2)
+                for stop, mul in ((0.0, 1.0), (0.35, 0.45), (0.7, 0.14), (1.0, 0.0)):
+                    c = QColor(col)
+                    c.setAlphaF(mul)
+                    grad.setColorAt(stop, c)
+                q.setBrush(QBrush(grad))
+            else:                                                       # "halo": a flat disc, faded at its rim
+                grad = QRadialGradient(QPointF(size / 2, size / 2), size / 2)
+                for stop, mul in ((0.0, 1.0), (0.5, 0.8), (1.0, 0.0)):
+                    c = QColor(col)
+                    c.setAlphaF(mul)
+                    grad.setColorAt(stop, c)
+                q.setBrush(QBrush(grad))
+            q.drawEllipse(QPointF(size / 2, size / 2), size / 2, size / 2)
+            q.end()
+            self._sprites[key] = pm
+        return pm
+
+    def _paint_glow(self, p: QPainter, top: float, kw: float):
+        """Held-note glow: a soft light rising from each held key, brighter and taller for harder notes."""
+        reach = min(self.fx.height * 0.55, 150.0)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.setCompositionMode(QPainter.CompositionMode_Plus)
+        p.setPen(Qt.NoPen)
+        p.save()
+        p.setClipRect(QRectF(0, 0, self.width(), top))
+        pulse = 0.92 + 0.08 * math.sin(time.perf_counter() * 7.0)
+        ga = self.fx.glow_amount
+        for pitch, (level, col, strength) in self._glow.items():
+            span = self._key_span(pitch)
+            if span is None or level <= 0.0:
+                continue
+            grow = 0.7 + 0.3 * ga                                       # (a stronger glow is also a little bigger)
+            cx, rx, ry = (span[0] + span[1]) / 2, kw * 1.5 * grow, max(12.0, reach * (0.6 + 0.4 * min(1.4, strength)) * grow)
+            a = max(0.0, min(1.0, 0.7 * level * pulse * min(1.2, 0.5 + 0.5 * strength) * ga))
+            p.setOpacity(a)
+            p.drawPixmap(QRectF(cx - rx, top - ry, rx * 2, ry * 2), self._sprite("glow", col), SPRITE_RECT)
+        p.setOpacity(1.0)
+        p.restore()
+        p.setCompositionMode(QPainter.CompositionMode_SourceOver)
 
     def _paint_particles(self, p: QPainter):
         fx = self.fx
         shape = KINDS[fx.kind]["shape"]
         p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         p.setCompositionMode(QPainter.CompositionMode_Plus if fx.glow else QPainter.CompositionMode_SourceOver)
         pops, flicker = KINDS[fx.kind].get("pop", False), KINDS[fx.kind].get("flicker", 0.0)
         fade = KINDS[fx.kind].get("fade", 0.0)
         fade_top, top = KINDS[fx.kind].get("fade_top", 0.0), max(1.0, self._key_top())
+        puff_grow, pulse = KINDS[fx.kind].get("grow", 0.0), KINDS[fx.kind].get("pulse", False)
+        halo_mul = KINDS[fx.kind].get("halo", 1.0)
+        ga = fx.glow_amount
+        want_trails = fx.trails and self._quality == 0 and shape not in ("puff", "ring")     # (soft puffs and bubbles gain nothing from them)
         for q in self._particles:
+            if q.pts is not None:
+                self._paint_bolt(p, q)
+                continue
             if pops:                                                        # bubbles stay until they pop
                 life = min(1.0, q.age / 0.25)
             elif fade:                                                      # full brightness until the last moment
@@ -562,12 +914,44 @@ class PianoStrip(QWidget):
                 life *= max(0.0, min(1.0, q.y / (fade_top * top)))
             if flicker:                                                     # embers flicker as they burn
                 life *= 1.0 - flicker * (0.5 + 0.5 * math.sin(q.age * 13 + q.phase * 3))
-            if fx.glow:
-                halo = QColor(col)
-                halo.setAlphaF(max(0.0, (0.07 if shape == "ring" else 0.18) * life))
-                p.setPen(Qt.NoPen)
-                p.setBrush(halo)
-                p.drawEllipse(QPointF(q.x, q.y), r * 3.2, r * 3.2)
+            if pulse:                                                       # fireflies blink clearly on and off
+                s = 0.5 + 0.5 * math.sin(q.age * (2.3 + q.phase * 0.25) + q.phase * 2.0)
+                s = max(0.0, min(1.0, (s - 0.3) / 0.5))                       # off for a good part of each cycle
+                s = s * s * (3.0 - 2.0 * s)
+                life *= 0.015 + 0.985 * s
+                r *= 0.55 + 0.45 * s
+            tr = q.trail
+            if tr and len(tr) > 1 and (want_trails or q.rocket or q.streak):  # a fading streak behind it: faint thin tail, then a
+                n = len(tr)                                                 # stronger thicker head (two strokes, not one per step)
+                mid = n // 2
+                pen = QPen()
+                pen.setCapStyle(Qt.RoundCap)
+                tc = QColor(col)
+                (x0, y0), (xm, ym), (x1, y1) = tr[0], tr[mid], tr[-1]
+                for ax, ay, bx, by, wmul, amul in ((x0, y0, xm, ym, 0.8, 0.28), (xm, ym, x1, y1, 1.5, 0.6)):
+                    if abs(bx - ax) + abs(by - ay) < 0.6:
+                        continue
+                    tc.setAlphaF(max(0.0, min(1.0, amul * life)))
+                    pen.setColor(tc)
+                    pen.setWidthF(max(0.8, r * wmul))
+                    p.setPen(pen)
+                    p.drawLine(QPointF(ax, ay), QPointF(bx, by))
+            if shape == "puff":                                             # steam: a big soft puff that swells as it rises
+                t = min(1.0, q.age / q.ttl)
+                a = max(0.0, min(1.0, q.age / 0.3)) * life * 0.42
+                rad = q.size * (1.0 + puff_grow * t)
+                if a > 0.004:                                                   # (the key's own colour, as a cached soft sprite)
+                    p.setOpacity(min(1.0, a))
+                    p.drawPixmap(QRectF(q.x - rad, q.y - rad, rad * 2, rad * 2), self._sprite("puff", col), SPRITE_RECT)
+                    p.setOpacity(1.0)
+                continue
+            if fx.glow and shape != "ring":              # (a bubble's halo is barely visible - skipped)
+                ha = 0.18 * life * ga
+                if ha > 0.02:
+                    hr = r * 2.9 * halo_mul * (0.75 + 0.25 * ga)
+                    p.setOpacity(min(1.0, ha))
+                    p.drawPixmap(QRectF(q.x - hr, q.y - hr, hr * 2, hr * 2), self._sprite("halo", col), SPRITE_RECT)
+                    p.setOpacity(1.0)
             col.setAlphaF(max(0.0, min(1.0, 1.2 * life)))
             if shape == "ring":
                 pen = QPen(col)
@@ -600,6 +984,50 @@ class PianoStrip(QWidget):
                     pts.append(QPointF(q.x + math.cos(a) * d, q.y + math.sin(a) * d))
                 p.drawPolygon(QPolygonF(pts))
         p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+
+    def _paint_bolt(self, p: QPainter, q: _Particle):
+        """Lightning: a flickering white-hot core inside a wider coloured glow, gone in a fraction of a second. The bolt is
+        drawn once into a picture; each frame only fades that picture."""
+        t = q.age / max(0.01, q.ttl)
+        a = (1.0 - t) ** 0.8 * (0.55 + 0.45 * abs(math.sin(q.age * 110.0 + q.phase)))
+        if q.sprite is None:
+            q.sprite = self._render_bolt(q)
+        pm, x0, y0 = q.sprite
+        p.setOpacity(max(0.0, min(1.0, a)))
+        p.drawPixmap(QPointF(x0, y0), pm)
+        p.setOpacity(1.0)
+
+    def _render_bolt(self, q: _Particle):
+        col = QColor(q.color)
+        ga = self.fx.glow_amount
+        layers = [(q.size * 0.7, QColor(col).lighter(200), 1.0), (q.size * 2.0, col, min(1.0, 0.4 * (0.6 + 0.4 * ga)))]
+        if self.fx.glow:
+            layers.append((q.size * 5.0 * (0.7 + 0.3 * ga), col, min(1.0, 0.13 * ga)))
+        pad = max(w for w, _c, _m in layers) + 2.0
+        xs = [x for line in q.pts for x, _ in line]
+        ys = [y for line in q.pts for _, y in line]
+        x0, y0 = math.floor(min(xs) - pad), math.floor(min(ys) - pad)
+        w, h = math.ceil(max(xs) + pad) - x0, math.ceil(max(ys) + pad) - y0
+        dpr = max(1.0, self.devicePixelRatioF())
+        pm = QPixmap(max(1, int(w * dpr)), max(1, int(h * dpr)))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.transparent)
+        g = QPainter(pm)
+        g.setRenderHint(QPainter.Antialiasing, True)
+        g.setCompositionMode(QPainter.CompositionMode_Plus)
+        for width, c, mul in reversed(layers):
+            c = QColor(c)
+            c.setAlphaF(mul)
+            pen = QPen(c)
+            pen.setWidthF(max(1.0, width))
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            g.setPen(pen)
+            g.setBrush(Qt.NoBrush)
+            for line in q.pts:
+                g.drawPolyline(QPolygonF([QPointF(x - x0, y - y0) for x, y in line]))
+        g.end()
+        return pm, float(x0), float(y0)
 
     @staticmethod
     def _paint_pop(p: QPainter, q: _Particle, col: QColor):
