@@ -78,6 +78,7 @@ class UpdateController(QObject):
         self.win = window
         self.settings = window.settings
         self._busy = False
+        updater.warm_up()                       # (the network modules load in the background while the window is built)
         self._cancel = threading.Event()
         self._dlg: Optional[QProgressDialog] = None
         updater.set_repo_override(self.settings.value("updates/repo", "", str) or "")

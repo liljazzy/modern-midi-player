@@ -345,7 +345,7 @@ def main():
         dlg.choice = upd_mod.UpdateDialog.SKIP
     upd_mod.UpdateDialog.exec = fake_exec
     uc.check(manual=True)
-    for _ in range(100):
+    for _ in range(1000):                       # (up to 20 s: a cold CI machine can take a few seconds to import the network modules)
         if choices:
             break
         time.sleep(0.02)
@@ -358,7 +358,7 @@ def main():
     updater.launch_installer = lambda path, silent=True, relaunch=True: launched.append((path, silent, relaunch))
     info = updater.check()
     uc.download_and_install(info)
-    for _ in range(200):
+    for _ in range(1000):
         if launched:
             break
         time.sleep(0.02)

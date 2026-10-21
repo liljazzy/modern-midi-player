@@ -118,6 +118,17 @@ def is_newer(remote: str, local: str = __version__) -> bool:
 
 
 # ------------------------------------------------------------------- fetch
+def warm_up() -> None:
+    """Load the network modules on a background thread, so the first update check does not have to wait for them
+    (they are not imported at start-up: they take ~40 ms and most runs never need them before the check)."""
+    def load():
+        try:
+            import urllib.error, urllib.request  # noqa: F401
+        except Exception:
+            pass
+    threading.Thread(target=load, daemon=True, name="net-warmup").start()
+
+
 def _get(url: str, timeout: float = 15.0, accept: str = "application/vnd.github+json") -> bytes:
     import urllib.error, urllib.request      # (imported here: they take ~40 ms to load and are not needed to start the app)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
