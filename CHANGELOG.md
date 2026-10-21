@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.1
+- **Effects come out with every note:** each note-on now makes its own burst the moment it plays, even very short notes and quick repeats of the same key (before, effects only noticed keys about 30 times a second, so they appeared in batches and some notes were missed). Short notes still light their key briefly.
+- **No more silent stretches in busy music:** when the screen was full of particles, new notes were dropped. A new note now always gets its burst; the oldest particles make way.
+- **Particle limit setting** in View > Piano effects (100 to 4000, default 900).
+- **Particles leave in their own way:** when particles are cleared to make room they shimmer (stars), pop (bubbles, some sparks), burst (rockets) or fade, one after another on a slow-then-fast curve, instead of all vanishing at once.
+- **Click-through particle area:** on the popped-out piano only the keys react to the mouse; the particle area above them lets clicks through to the window behind.
+- **Faster everywhere:** the editor uses about a fifth of the CPU while playing a big song (the playhead repaint is 12x cheaper) and repaints faster when scrolling or zooming; the main window starts in about half the time (the sound output opens while the window is built); the mixer builds faster; changing song in a large playlist no longer stalls; song lengths in the playlist are worked out in smaller steps. Nothing looks different.
+- **Fix:** a lightning bolt could reach above the top of the effect area.
+
 ## 1.3.0
 - **Four new piano effects:** **Fireflies** (slow glowing dots that wander within a limited range and blink on and off), **Lightning** (several jagged, branching bolts per key), **Steam** (soft puffs in the key's own colour) and **Fireworks** (a rocket bursts into a pattern). Fireworks have a **Firework pattern** setting: Random, Peony, Ring, Heart, Star, Spiral, Double ring, Willow or Crackle.
 - **New effect options** in View > Piano effects: **Held-note glow** (a soft light above a key while it is held), **Pitch-to-colour** (red for low notes through to violet for high notes, on the keys too), **Velocity scaling** (harder notes make more, bigger, faster effects) and **Trails**.

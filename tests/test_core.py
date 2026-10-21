@@ -149,6 +149,25 @@ class EngineTests(unittest.TestCase):
             self.eng._dispatch(bytes([0x81, 60, 0]))
         self.assertEqual(self.eng.active_notes(), {})
 
+    def test_note_events_for_the_piano_effects(self):
+        """Every note-on is reported with its time - even a note that is over before the piano looks, and quick repeats."""
+        self.eng.set_transpose(2)
+        with self.eng.lock:
+            self.eng._dispatch(bytes([0x91, 60, 90]))
+            self.eng._dispatch(bytes([0x81, 60, 0]))        # gone again immediately: active_notes() never sees it
+            self.eng._dispatch(bytes([0x91, 60, 70]))       # the same key struck again
+            self.eng._dispatch(bytes([0x99, 42, 90]))       # drums are left out
+        self.assertEqual(self.eng.active_notes(), {62: 1})
+        events = self.eng.take_note_events()
+        self.assertEqual([(e[1], e[2], e[3]) for e in events], [(62, 1, 90), (62, 1, 70)])
+        self.assertTrue(events[0][0] <= events[1][0])
+        self.assertEqual(self.eng.take_note_events(), [])    # taken: not reported twice
+
+    def test_keyboard_notes_are_events_too(self):
+        self.eng.live_message(bytes([0x90, 64, 100]))
+        self.eng.live_message(bytes([0x90, 64, 0]))
+        self.assertEqual([(e[1], e[2], e[3]) for e in self.eng.take_note_events()], [(64, 0, 100)])
+
     def test_mute_and_solo(self):
         self.eng.set_mute(9, True)
         self.play_through()

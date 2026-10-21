@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import sys
+import threading
 import wave
 from dataclasses import replace
 from typing import List, Optional
@@ -9,7 +11,7 @@ from typing import List, Optional
 from PySide6.QtCore import QByteArray, QRect, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QLabel, QMainWindow, QMessageBox,
-                               QProgressDialog, QTabWidget, QVBoxLayout, QWidget)
+                               QProgressDialog, QStackedWidget, QTabWidget, QVBoxLayout, QWidget)
 
 from .. import HOMEPAGE, __version__, updater
 from ..backends import (BackendError, FluidSynthBackend, MidiInput, NullBackend, OutputInfo, available_outputs,
@@ -31,10 +33,34 @@ from .updates import UpdateController
 ORG, APP = "ModernMidi", "MidiPlayer"
 
 
+class _OutputPrefetch(threading.Thread):
+    """Opens the sound output used last time on a worker thread while the window is being built.
+
+    Opening it takes about 90 ms (FluidSynth loading its SoundFont, Windows starting its wavetable synth) - about a third
+    of the time the window needs to appear - and nothing else depends on it until the output is selected, so the two
+    overlap."""
+
+    def __init__(self, info: OutputInfo, fluid_lib: str):
+        super().__init__(daemon=True, name="output-prefetch")
+        self.info, self.lib = info, fluid_lib
+        self.backend = None
+        self.start()
+
+    def run(self):
+        try:
+            self.backend = open_output(self.info, self.lib)
+        except Exception:                           # (the normal path will try again and report it properly)
+            self.backend = None
+
+    def matches(self, info: OutputInfo) -> bool:
+        return (info.kind, info.ident) == (self.info.kind, self.info.ident)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, files: Optional[List[str]] = None):
         super().__init__()
         self.settings = QSettings(ORG, APP)
+        self._prefetch = self._start_output_prefetch()
         self.engine = Engine(NullBackend())
         self.ctl = Controller(self.engine, self)
         self.playlist = Playlist()
@@ -55,20 +81,23 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         # ---- central area
-        central = QWidget()
+        # (Every widget is created inside the parent it ends up in: re-parenting makes Qt re-apply the application style
+        # sheet to the widget and everything under it, which used to be about a third of the start-up time.)
+        central = QWidget(self)
         cl = QVBoxLayout(central)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(0)
-        self.tabs = QTabWidget()
+        self.tabs = QTabWidget(central)
         self.tabs.setDocumentMode(True)
-        self.player_view = PlayerView(self.ctl)
-        self.mixer_view = MixerView(self.ctl)
-        self.editor_view = EditorView(self.ctl)
+        pages = self.tabs.findChild(QStackedWidget) or self.tabs
+        self.player_view = PlayerView(self.ctl, pages)
+        self.mixer_view = MixerView(self.ctl, pages)
+        self.editor_view = EditorView(self.ctl, pages)
         self.tabs.addTab(self.player_view, "Player")
         self.tabs.addTab(self.mixer_view, "Mixer")
         self.tabs.addTab(self.editor_view, "Editor")
         cl.addWidget(self.tabs, 1)
-        self.transport = TransportBar(self.ctl)
+        self.transport = TransportBar(self.ctl, central)
         cl.addWidget(self.transport)
         self.setCentralWidget(central)
 
@@ -76,8 +105,8 @@ class MainWindow(QMainWindow):
         self.setCorner(Qt.TopRightCorner, Qt.RightDockWidgetArea)
 
         # ---- playlist dock
-        self.playlist_view = PlaylistView(self.playlist)
         self.dock = QDockWidget("Playlist", self)
+        self.playlist_view = PlaylistView(self.playlist, self.dock)
         self.dock.setObjectName("playlistDock")
         self.dock.setWidget(self.playlist_view)
         self.dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable |
@@ -87,10 +116,11 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock)
 
         # ---- piano: docked under the transport bar, or popped out into its own frameless, transparent window
-        self.piano = PianoStrip()
-        self.piano.velocity_of = self.engine.velocity_of
-        self.ctl.activeNotes.connect(self.piano.set_active)
         self.piano_dock = QDockWidget("Piano", self)
+        self.piano = PianoStrip(self.piano_dock)
+        self.piano.velocity_of = self.engine.velocity_of
+        self.piano.event_source = self.engine.take_note_events
+        self.ctl.activeNotes.connect(self.piano.set_active)
         self.piano_dock.setObjectName("pianoDock")
         self.piano_dock.setWidget(self.piano)
         self.piano_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable)
@@ -328,6 +358,39 @@ class MainWindow(QMainWindow):
         self.outputs = available_outputs(self._soundfont_list(), self._fluid_lib())
         self._build_output_menu()
 
+    def _start_output_prefetch(self) -> Optional[_OutputPrefetch]:
+        """If the last session used a FluidSynth or Windows MIDI output, start opening it now (see _OutputPrefetch)."""
+        try:
+            kind = self.settings.value("outputKind", "", str)
+            ident = self.settings.value("outputIdent", "", str)
+            lib = self._fluid_lib()
+            if kind == "fluidsynth" and ident and os.path.isfile(ident) and find_fluidsynth(lib):
+                return _OutputPrefetch(OutputInfo("fluidsynth", ident, f"FluidSynth — {os.path.basename(ident)}"), lib)
+            if kind == "winmm" and sys.platform == "win32" and ident.lstrip("-").isdigit():
+                return _OutputPrefetch(OutputInfo("winmm", ident, "Windows MIDI"), lib)
+        except Exception:
+            pass
+        return None
+
+    def _take_prefetched(self, info: OutputInfo):
+        """The output opened ahead of time, if it is the one now being selected (else None)."""
+        pf = self._prefetch
+        if pf is None or not pf.matches(info):
+            return None
+        self._prefetch = None
+        pf.join()
+        return pf.backend
+
+    def _discard_prefetch(self):
+        pf, self._prefetch = self._prefetch, None
+        if pf is not None:
+            pf.join()
+            if pf.backend is not None:
+                try:
+                    pf.backend.close()
+                except Exception:
+                    pass
+
     def _init_output(self):
         self.refresh_outputs()
         kind = self.settings.value("outputKind", "", str)
@@ -336,6 +399,7 @@ class MainWindow(QMainWindow):
         for info in order:
             if self.select_output(info, quiet=True):
                 break
+        self._discard_prefetch()                      # (unused if the saved output was not the one that got selected)
         if self.current_output and self.current_output.kind == "null":
             QTimer.singleShot(400, lambda: self.statusBar().showMessage(
                 "No sound output available — see Output ▸ Output help…", 15000))
@@ -343,7 +407,7 @@ class MainWindow(QMainWindow):
     def select_output(self, info: OutputInfo, quiet: bool = False) -> bool:
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            backend = open_output(info, self._fluid_lib())
+            backend = self._take_prefetched(info) or open_output(info, self._fluid_lib())
         except (BackendError, OSError) as e:
             QApplication.restoreOverrideCursor()
             if not quiet:

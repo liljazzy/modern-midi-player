@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import traceback
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
@@ -111,6 +112,7 @@ class Engine:
         self.loop = False
         self.even_dynamics = False      # squeeze note velocities toward the middle at playback time
         self.live: Dict[tuple, int] = {}   # notes held on a connected MIDI keyboard: (channel, pitch) -> velocity
+        self.note_events: deque = deque(maxlen=256)   # (time, pitch, channel, velocity) of each note-on, for the piano effects
         self.last_vel: Dict[int, int] = {}  # sounding pitch -> velocity of its latest note-on (the piano scales effects by it)
         self.events: List[PlaybackEvent] = []
         self.times: List[float] = []
@@ -351,6 +353,17 @@ class Engine:
                     out[p] = ch
             return out
 
+    def take_note_events(self) -> list:
+        """Every note-on since the last call, oldest first, as (time, pitch, channel, velocity). Unlike active_notes() this
+        sees notes shorter than one poll and repeats of the same key, and says exactly when each one started."""
+        out = []
+        try:
+            while True:
+                out.append(self.note_events.popleft())
+        except IndexError:
+            pass
+        return out
+
     def velocity_of(self, pitch: int) -> int:
         """Velocity of the latest note-on at *pitch* (90 if none has been seen)."""
         return self.last_vel.get(pitch, 90)
@@ -369,6 +382,8 @@ class Engine:
                     return
                 self.live[(ch, msg[1])] = msg[2]
                 self.last_vel[msg[1]] = msg[2]
+                if ch != DRUM_CHANNEL:
+                    self.note_events.append((time.perf_counter(), msg[1], ch, msg[2]))
             elif hi == 0x80 and len(msg) >= 2:
                 self.live.pop((ch, msg[1]), None)
             self._send(msg, quiet=True)
@@ -535,6 +550,8 @@ class Engine:
             out = p if ch == DRUM_CHANNEL else max(0, min(127, p + self.transpose))
             cs.active.setdefault(p, []).append(out)
             self.last_vel[out] = d[2]
+            if ch != DRUM_CHANNEL:
+                self.note_events.append((time.perf_counter(), out, ch, d[2]))
             vel = d[2]
             if self.even_dynamics:
                 vel = even_velocity(vel)

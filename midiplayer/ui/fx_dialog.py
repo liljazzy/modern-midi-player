@@ -8,7 +8,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
                                QLabel, QPushButton, QSlider, QVBoxLayout, QWidget)
 
-from .piano_strip import COLOR_MODES, KINDS, MAX_HEIGHT, PATTERNS, FxConfig, PianoStrip
+from .piano_strip import COLOR_MODES, KINDS, MAX_HEIGHT, MAX_LIMIT, MIN_LIMIT, PATTERNS, FxConfig, PianoStrip
 
 
 class _Slider(QWidget):
@@ -103,6 +103,9 @@ class PianoFxDialog(QDialog):
         self.gravity = _Slider(-100, 100, cfg.gravity, 1, "", ch)
         self.bounce = _Slider(0, 150, int(cfg.bounce * 100), 0.01, "×", ch)
         self.height = _Slider(20, MAX_HEIGHT, cfg.height, 1, " px", ch)
+        self.limit = _Slider(MIN_LIMIT // 50, MAX_LIMIT // 50, cfg.max_particles // 50, 50, "", ch)
+        self.limit.setToolTip("The most particles on screen at once. When it is full the oldest leave (fade, shimmer or pop away) to make room for new notes. "
+                              "Higher looks fuller in busy music but costs more to draw.")
         form.addRow("Amount", self.amount)
         form.addRow("Size", self.size)
         form.addRow("Speed", self.speed)
@@ -113,6 +116,7 @@ class PianoFxDialog(QDialog):
         form.addRow("", hint)
         form.addRow("Bounce", self.bounce)
         form.addRow("Effect height", self.height)
+        form.addRow("Particle limit", self.limit)
 
         self.glow = QCheckBox("Glow")
         self.glow.setChecked(cfg.glow)
@@ -162,7 +166,7 @@ class PianoFxDialog(QDialog):
             life=self.life.value(), gravity=int(self.gravity.value()), bounce=self.bounce.value(),
             glow=self.glow.isChecked(), glow_amount=self.glow_amount.value(), held_glow=self.held_glow.isChecked(), pitch_color=self.pitch_color.isChecked(),
             velocity=self.velocity.isChecked(), trails=self.trails.isChecked(), pattern=self.pattern.currentData(),
-            color_mode=self.mode.currentData(), color=self._color, height=int(self.height.value()))
+            color_mode=self.mode.currentData(), color=self._color, height=int(self.height.value()), max_particles=int(self.limit.value()))
 
     def _apply(self, *_):
         self.strip.set_fx(self.config())
@@ -206,6 +210,7 @@ class PianoFxDialog(QDialog):
         self.gravity.set_value(d.gravity)
         self.bounce.set_value(d.bounce)
         self.height.set_value(d.height)
+        self.limit.set_value(d.max_particles)
         self.glow.setChecked(d.glow)
         self.glow_amount.set_value(d.glow_amount)
         self.held_glow.setChecked(d.held_glow)

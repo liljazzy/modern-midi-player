@@ -173,8 +173,8 @@ class Fader(QSlider):
         self.setValue(self.default)
 
 
-def small_button(text: str, name: str = "", checkable: bool = True, tip: str = "") -> QPushButton:
-    b = QPushButton(text)
+def small_button(text: str, name: str = "", checkable: bool = True, tip: str = "", parent=None) -> QPushButton:
+    b = QPushButton(text, parent)
     if name:
         b.setObjectName(name)
     b.setCheckable(checkable)

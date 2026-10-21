@@ -2,11 +2,35 @@
 plus the little title bar the piano has while it is docked in the main window."""
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QRectF, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QPainter, QPen
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QPushButton, QVBoxLayout, QWidget
+import sys
+
+from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QCursor, QPainter, QPen
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMenu, QPushButton, QVBoxLayout, QWidget
 
 from .piano_strip import KEYS_H, WHITE_KEYS
+
+WS_EX_TRANSPARENT, GWL_EXSTYLE = 0x20, -20
+
+
+def _native_click_through(hwnd: int, on: bool) -> bool:
+    """Windows: switch the window's WS_EX_TRANSPARENT style directly (Qt's own WindowTransparentForInput flag can switch it
+    on but does not reliably switch it off again). Returns False if that was not possible."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        get = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+        put = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+        get.restype, get.argtypes = ctypes.c_ssize_t, [ctypes.c_void_p, ctypes.c_int]
+        put.restype, put.argtypes = ctypes.c_ssize_t, [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+        style = get(hwnd, GWL_EXSTYLE)
+        put(hwnd, GWL_EXSTYLE, (style | WS_EX_TRANSPARENT) if on else (style & ~WS_EX_TRANSPARENT))
+        return True
+    except Exception:
+        return False
+
 
 GRIP_MIN, GRIP_MAX = 10, 60   # px: the resize handles are one white key wide, but never narrower / wider than this
 MIN_WIDTH = 320
@@ -67,7 +91,8 @@ class EdgeGrip(QWidget):
 class PianoWindow(QWidget):
     """Own top-level window (so a screen recorder lists it as a window), no frame, transparent background.
     Drag the keys to move it (drop it on the main window to dock it), drag the end key on either side to
-    resize it, double-click to dock it back."""
+    resize it, double-click to dock it back. Only the keys react to the mouse: the particle area above them is
+    click-through, so clicks go to whatever is behind the window (a particle can't be clicked)."""
     dockRequested = Signal()          # the user wants the piano back in the main window
     dragMoved = Signal(QPoint)        # while being dragged: where the cursor is (global)
     dragFinished = Signal(QPoint)     # the drag ended here (global): the main window decides whether that docks it
@@ -81,6 +106,10 @@ class PianoWindow(QWidget):
         self.quitting = False
         self.on_top = True
         self._drag_from = None
+        self._through = None                 # is the window currently click-through? (None = not applied yet)
+        self._input_timer = QTimer(self)
+        self._input_timer.setInterval(25)
+        self._input_timer.timeout.connect(self._sync_input)
         self.setWindowTitle("Modern MIDI Player - Piano")
         self._apply_flags()
         self.setAttribute(Qt.WA_TranslucentBackground, True)          # must be set before the window is shown
@@ -163,6 +192,31 @@ class PianoWindow(QWidget):
             self.show()                       # changing the window flags hides the window
         self.onTopChanged.emit(on)
 
+    # ---------------------------------------------------------------- click-through particle area
+    def keys_top(self) -> int:
+        """Where the keys start (window coordinates): everything above this is the particle area."""
+        return self.strip._key_top() if self.strip is not None else 0
+
+    def _sync_input(self):
+        """Make the window ignore the mouse (clicks fall through to whatever is behind it) except over the keyboard.
+
+        A transparent window already lets clicks through its fully transparent pixels, but not through a particle's
+        pixels, so the particle area as a whole is made click-through; the keys (and the resize handles on them) stay
+        grabbable. It is switched by watching the cursor, because a window that ignores the mouse gets no mouse
+        events to react to. A press that started on the keys (a drag or resize) is never interrupted."""
+        wh = self.windowHandle()
+        if wh is None or not self.isVisible():
+            return
+        pos = self.mapFromGlobal(QCursor.pos())
+        on_keys = self.rect().contains(pos) and pos.y() >= self.keys_top()
+        grip_busy = any(g._start is not None for g in (self.grip_left, self.grip_right))
+        held = bool(QApplication.mouseButtons() & Qt.LeftButton) and self._through is False
+        through = not (on_keys or grip_busy or self._drag_from is not None or held)
+        if through != self._through:
+            self._through = through
+            if not _native_click_through(int(self.winId()), through):
+                wh.setFlag(Qt.WindowTransparentForInput, through)
+
     # ---------------------------------------------------------------- mouse: move, resize, dock
     # Moving is done by hand (not the system's move loop) so every mouse event arrives - including the release,
     # which is what lets a drag onto the main window dock the piano.
@@ -215,10 +269,14 @@ class PianoWindow(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
+        self._through = None                  # (a freshly created native window starts out solid)
+        self._input_timer.start()
+        self._sync_input()
         self.shownChanged.emit(True)
 
     def hideEvent(self, e):
         super().hideEvent(e)
+        self._input_timer.stop()
         self.shownChanged.emit(False)
 
 

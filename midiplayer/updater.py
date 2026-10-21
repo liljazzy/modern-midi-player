@@ -16,8 +16,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
@@ -121,6 +119,7 @@ def is_newer(remote: str, local: str = __version__) -> bool:
 
 # ------------------------------------------------------------------- fetch
 def _get(url: str, timeout: float = 15.0, accept: str = "application/vnd.github+json") -> bytes:
+    import urllib.error, urllib.request      # (imported here: they take ~40 ms to load and are not needed to start the app)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -195,6 +194,7 @@ def download(info: UpdateInfo, dest_dir: Optional[str] = None,
     """Download and verify the installer. Returns the local path."""
     if not info.installer_url:
         raise UpdateError("This release has no Windows installer.")
+    import urllib.error, urllib.request
     dest_dir = dest_dir or os.path.join(tempfile.gettempdir(), "ModernMidiPlayer-update")
     os.makedirs(dest_dir, exist_ok=True)
     name = os.path.basename(info.installer_name or "ModernMidiPlayer-Setup.exe")

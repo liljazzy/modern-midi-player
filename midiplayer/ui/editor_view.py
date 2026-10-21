@@ -30,6 +30,24 @@ SNAPS = [("Bar", "bar"), ("1/2", 2), ("1/4", 4), ("1/8", 8), ("1/16", 16), ("1/3
          ("1/8 T", 12), ("1/16 T", 24), ("Off", 0)]
 
 
+_COLS: Dict[str, QColor] = {}
+_NOTE_COLS: Dict[tuple, tuple] = {}      # (channel, velocity) -> (fill colour, outline pen) of an editable note
+_DIM_COLS: Dict[int, QColor] = {}        # channel -> faded colour of a note on a track that is not being edited
+_NOTE_NAMES: Dict[int, str] = {}
+_ALIGN_LEFT_VCENTER = Qt.AlignLeft | Qt.AlignVCenter
+_ALIGN_RIGHT_VCENTER = Qt.AlignRight | Qt.AlignVCenter
+_SEL_PEN = QPen(QColor("white"), 1.5)
+_col_label = QColor(20, 20, 24, 200)
+
+
+def _col(name: str) -> QColor:
+    """A fixed colour by name, made once (the paint code asks for the same handful thousands of times)."""
+    c = _COLS.get(name)
+    if c is None:
+        c = _COLS[name] = QColor(name)
+    return c
+
+
 class PianoRoll(QAbstractScrollArea):
     edited = Signal()
     selectionChanged = Signal()
@@ -682,73 +700,124 @@ class PianoRoll(QAbstractScrollArea):
     def paintEvent(self, e):
         vp = self.viewport()
         p = QPainter(vp)
-        W, H = vp.width(), vp.height()
-        p.fillRect(0, 0, W, H, QColor(theme.BG))
         if not self.song:
+            p.fillRect(0, 0, vp.width(), vp.height(), QColor(theme.BG))
             p.setPen(QColor(theme.TEXT_DIM))
             p.drawText(vp.rect(), Qt.AlignCenter, "Open a MIDI file or create a new song (File ▸ New) to start editing")
             return
+        # Paint each exposed rectangle on its own, clipped to it, and draw only what can show in it: a moving playhead
+        # exposes a thin strip, so the (many) notes elsewhere are never even visited. The picture is the same as painting
+        # everything and letting the clip discard the rest.
+        for rect in ([vp.rect()] if e is None else list(e.region())):
+            p.save()
+            p.setClipRect(rect)
+            self._paint_rect(p, vp, rect)
+            p.restore()
+        p.end()
+
+    def _paint_rect(self, p: QPainter, vp, clip: QRect):
+        W, H = vp.width(), vp.height()
+        kh, zx = self.kh, self.zx
+        hs, vs = self.horizontalScrollBar().value(), self.verticalScrollBar().value()
+        cl, cr, ct, cb = clip.left(), clip.right() + 1, clip.top(), clip.bottom() + 1
+        p.fillRect(0, 0, W, H, QColor(theme.BG))
         # --- key rows
-        top_pitch = self.pitch_of(RULER_H)
-        bot_pitch = self.pitch_of(H)
-        for pitch in range(bot_pitch, top_pitch + 1):
-            y = self.y_of(pitch)
-            col = QColor("#171a21") if pitch % 12 in BLACK_KEYS else QColor("#1d2029")
-            p.fillRect(QRectF(KEY_W, y, W - KEY_W, self.kh), col)
-            if pitch % 12 == 0:
-                p.fillRect(QRectF(KEY_W, y + self.kh - 1, W - KEY_W, 1), QColor("#2e3342"))
+        top_pitch = max(0, min(127, 127 - int(math.floor((RULER_H - RULER_H + vs) / kh))))
+        bot_pitch = max(0, min(127, 127 - int(math.floor((H - RULER_H + vs) / kh))))
+        t0 = max(0.0, (KEY_W - KEY_W + hs) / zx)
+        t1 = max(0.0, (W - KEY_W + hs) / zx)
+        if cr > KEY_W:
+            for pitch in range(bot_pitch, top_pitch + 1):
+                y = RULER_H + (127 - pitch) * kh - vs
+                if y >= cb or y + kh <= ct:
+                    continue
+                p.fillRect(QRectF(KEY_W, y, W - KEY_W, kh), _col("#171a21") if pitch % 12 in BLACK_KEYS else _col("#1d2029"))
+                if pitch % 12 == 0:
+                    p.fillRect(QRectF(KEY_W, y + kh - 1, W - KEY_W, 1), _col("#2e3342"))
         # --- grid
-        t0, t1 = self.tick_of(KEY_W), self.tick_of(W)
         num, den = self.song.time_signature()
         beat = self.tpb * 4 / den
         bar = beat * num
         sub = self.snap_ticks()
-        if sub * self.zx >= 6 and sub < beat:
-            k = int(t0 // sub)
-            while k * sub <= t1:
-                x = self.x_of(k * sub)
-                p.fillRect(QRectF(x, RULER_H, 1, H), QColor("#1f232d"))
-                k += 1
-        if beat * self.zx >= 5:
-            k = int(t0 // beat)
-            while k * beat <= t1:
-                x = self.x_of(k * beat)
-                p.fillRect(QRectF(x, RULER_H, 1, H), QColor("#2a2f3c"))
-                k += 1
         bar_step = 1
-        while bar * bar_step * self.zx < 40:
+        while bar * bar_step * zx < 40:
             bar_step *= 2
-        k = int(t0 // bar)
-        k -= k % bar_step
-        while k * bar <= t1:
-            x = self.x_of(k * bar)
-            p.fillRect(QRectF(x, RULER_H, 1, H), QColor("#3a4152"))
-            k += bar_step
+        if cr > KEY_W and ct < H:
+            g0 = max(t0, max(0.0, (cl - 2 - KEY_W + hs) / zx))
+            g1 = min(t1, max(0.0, (cr + 2 - KEY_W + hs) / zx))
+            if sub * zx >= 6 and sub < beat:
+                k = int(g0 // sub)
+                c = _col("#1f232d")
+                while k * sub <= g1:
+                    p.fillRect(QRectF(KEY_W + k * sub * zx - hs, RULER_H, 1, H), c)
+                    k += 1
+            if beat * zx >= 5:
+                k = int(g0 // beat)
+                c = _col("#2a2f3c")
+                while k * beat <= g1:
+                    p.fillRect(QRectF(KEY_W + k * beat * zx - hs, RULER_H, 1, H), c)
+                    k += 1
+            k = int(g0 // bar)
+            k -= k % bar_step
+            c = _col("#3a4152")
+            while k * bar <= g1:
+                p.fillRect(QRectF(KEY_W + k * bar * zx - hs, RULER_H, 1, H), c)
+                k += bar_step
         # --- notes
-        editable = set(self.editable_tracks())
         font = QFont(p.font())
         font.setPointSize(7)
         p.setFont(font)
-        show_labels = self.kh >= 11
-        for ti, n in self.visible_notes(t0, t1):
-            x0, x1 = self.x_of(n.start), self.x_of(n.end)
-            y = self.y_of(n.pitch)
-            if y + self.kh < RULER_H or y > H:
-                continue
-            r = QRectF(x0, y + 1, max(3.0, x1 - x0 - 1), self.kh - 2)
-            col = QColor(CHANNEL_COLORS[n.channel])
-            if ti not in editable:
-                col.setAlpha(55)
-                p.setPen(Qt.NoPen)
-            else:
-                col = col.darker(100 + int((127 - n.velocity) * 0.8))
-                sel = n in self.selection
-                p.setPen(QPen(QColor("white"), 1.5) if sel else QPen(col.darker(160), 1))
-            p.setBrush(col)
-            p.drawRoundedRect(r, 2.5, 2.5)
-            if show_labels and ti in editable and r.width() > 26:
-                p.setPen(QColor(20, 20, 24, 200))
-                p.drawText(r.adjusted(3, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, note_name(n.pitch))
+        if cr > KEY_W and ct < H:
+            editable = set(self.editable_tracks())
+            show_labels = kh >= 11
+            n0 = max(t0, max(0.0, (cl - 6 - KEY_W + hs) / zx))          # (notes further left / right cannot touch this rectangle)
+            n1 = min(t1, max(0.0, (cr + 6 - KEY_W + hs) / zx))
+            note_cols, dim_cols, names = _NOTE_COLS, _DIM_COLS, _NOTE_NAMES
+            sel_pen = _SEL_PEN
+            selection = self.selection
+            label_pen = _col_label
+            cur = None                                                   # which pen / brush is set on the painter now
+            brush_cur = None
+            for ti, n in self.visible_notes(n0, n1):
+                y = RULER_H + (127 - n.pitch) * kh - vs
+                if y + kh < RULER_H or y > H or y + kh + 3 < ct or y - 3 > cb:
+                    continue
+                x0 = KEY_W + n.start * zx - hs
+                x1 = KEY_W + n.end * zx - hs
+                r = QRectF(x0, y + 1, max(3.0, x1 - x0 - 1), kh - 2)
+                if ti not in editable:
+                    key = n.channel
+                    fill = dim_cols.get(key)
+                    if fill is None:
+                        fill = dim_cols[key] = QColor(CHANNEL_COLORS[key])
+                        fill.setAlpha(55)
+                    pen_tok = "none"
+                    pen = None
+                else:
+                    key = (n.channel, n.velocity)
+                    ent = note_cols.get(key)
+                    if ent is None:
+                        col = QColor(CHANNEL_COLORS[n.channel]).darker(100 + int((127 - n.velocity) * 0.8))
+                        ent = note_cols[key] = (col, QPen(col.darker(160), 1))
+                    fill = ent[0]
+                    if n in selection:
+                        pen_tok, pen = "sel", sel_pen
+                    else:
+                        pen_tok, pen = key, ent[1]
+                if cur != pen_tok:
+                    p.setPen(Qt.NoPen if pen is None else pen)
+                    cur = pen_tok
+                if brush_cur is not fill:
+                    p.setBrush(fill)
+                    brush_cur = fill
+                p.drawRoundedRect(r, 2.5, 2.5)
+                if show_labels and ti in editable and r.width() > 26:
+                    p.setPen(label_pen)
+                    cur = "label"
+                    name = names.get(n.pitch)
+                    if name is None:
+                        name = names[n.pitch] = note_name(n.pitch)
+                    p.drawText(r.adjusted(3, 0, 0, 0), _ALIGN_LEFT_VCENTER, name)
         # --- rubber band
         if self._rubber is not None:
             p.setPen(QPen(QColor(theme.ACCENT), 1, Qt.DashLine))
@@ -757,48 +826,61 @@ class PianoRoll(QAbstractScrollArea):
             p.setBrush(c)
             p.drawRect(self._rubber.normalized())
         # --- playhead
-        px = self.x_of(self._playhead_tick)
+        px = KEY_W + self._playhead_tick * zx - hs
         if KEY_W <= px <= W:
             p.fillRect(QRectF(px, 0, 2, H), QColor(theme.ACCENT2))
         # --- ruler
-        p.fillRect(0, 0, W, RULER_H, QColor(theme.BG2))
-        p.fillRect(0, RULER_H - 1, W, 1, QColor(theme.BORDER))
-        p.setPen(QColor(theme.TEXT_DIM))
-        f2 = QFont(p.font())
-        f2.setPointSize(8)
-        p.setFont(f2)
-        k = int(t0 // bar)
-        k -= k % bar_step
-        while k * bar <= t1:
-            x = self.x_of(k * bar)
-            if x >= KEY_W:
-                p.fillRect(QRectF(x, RULER_H - 8, 1, 8), QColor(theme.TEXT_DIM))
-                p.drawText(QRectF(x + 3, 2, 60, RULER_H - 4), Qt.AlignLeft | Qt.AlignVCenter, str(k + 1))
-            k += bar_step
-        if KEY_W <= px <= W:
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(theme.ACCENT2))
-            p.drawPolygon(QPolygon([QPoint(int(px) - 5, 2), QPoint(int(px) + 6, 2), QPoint(int(px) + 1, 9)]))
+        f2 = None
+        if ct < RULER_H:
+            p.fillRect(0, 0, W, RULER_H, QColor(theme.BG2))
+            p.fillRect(0, RULER_H - 1, W, 1, QColor(theme.BORDER))
+            p.setPen(QColor(theme.TEXT_DIM))
+            f2 = QFont(p.font())
+            f2.setPointSize(8)
+            p.setFont(f2)
+            r0 = max(t0, max(0.0, (cl - 70 - KEY_W + hs) / zx))
+            r1 = min(t1, max(0.0, (cr + 6 - KEY_W + hs) / zx))
+            k = int(r0 // bar)
+            k -= k % bar_step
+            dim = QColor(theme.TEXT_DIM)
+            while k * bar <= r1:
+                x = KEY_W + k * bar * zx - hs
+                if x >= KEY_W:
+                    p.fillRect(QRectF(x, RULER_H - 8, 1, 8), dim)
+                    p.drawText(QRectF(x + 3, 2, 60, RULER_H - 4), _ALIGN_LEFT_VCENTER, str(k + 1))
+                k += bar_step
+            if KEY_W <= px <= W:
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(theme.ACCENT2))
+                p.drawPolygon(QPolygon([QPoint(int(px) - 5, 2), QPoint(int(px) + 6, 2), QPoint(int(px) + 1, 9)]))
         # --- keyboard
-        sounding = self._sounding_pitches()
-        p.fillRect(0, RULER_H, KEY_W, H, QColor("#e9ebf0"))
-        p.setFont(f2)
-        for pitch in range(bot_pitch, top_pitch + 1):
-            y = self.y_of(pitch)
-            r = QRectF(0, y, KEY_W, self.kh)
-            black = pitch % 12 in BLACK_KEYS
-            if pitch in sounding:
-                p.fillRect(r, QColor(theme.ACCENT2))
-            elif pitch == self._hover_pitch:
-                p.fillRect(r, QColor("#b8b0ff") if not black else QColor("#5a52a8"))
-            elif black:
-                p.fillRect(QRectF(0, y, KEY_W * 0.62, self.kh), QColor("#23262e"))
-            p.fillRect(QRectF(0, y + self.kh - 1, KEY_W, 1), QColor("#c3c7d0"))
-            if pitch % 12 == 0 and self.kh >= 8:
-                p.setPen(QColor("#50566a"))
-                p.drawText(QRectF(0, y, KEY_W - 4, self.kh), Qt.AlignRight | Qt.AlignVCenter, note_name(pitch))
-        p.fillRect(QRectF(KEY_W - 1, RULER_H, 1, H), QColor(theme.BORDER))
-        p.fillRect(0, 0, KEY_W, RULER_H, QColor(theme.BG2))
+        if cl < KEY_W:
+            sounding = self._sounding_pitches()
+            if f2 is None:
+                f2 = QFont(p.font())
+                f2.setPointSize(8)
+            p.fillRect(0, RULER_H, KEY_W, H, _col("#e9ebf0"))
+            p.setFont(f2)
+            hover = self._hover_pitch
+            key_line = _col("#c3c7d0")
+            for pitch in range(bot_pitch, top_pitch + 1):
+                y = RULER_H + (127 - pitch) * kh - vs
+                if y >= cb or y + kh <= ct:
+                    continue
+                r = QRectF(0, y, KEY_W, kh)
+                black = pitch % 12 in BLACK_KEYS
+                if pitch in sounding:
+                    p.fillRect(r, QColor(theme.ACCENT2))
+                elif pitch == hover:
+                    p.fillRect(r, _col("#b8b0ff") if not black else _col("#5a52a8"))
+                elif black:
+                    p.fillRect(QRectF(0, y, KEY_W * 0.62, kh), _col("#23262e"))
+                p.fillRect(QRectF(0, y + kh - 1, KEY_W, 1), key_line)
+                if pitch % 12 == 0 and kh >= 8:
+                    p.setPen(_col("#50566a"))
+                    p.drawText(QRectF(0, y, KEY_W - 4, kh), _ALIGN_RIGHT_VCENTER, note_name(pitch))
+            p.fillRect(QRectF(KEY_W - 1, RULER_H, 1, H), QColor(theme.BORDER))
+            p.fillRect(0, 0, KEY_W, RULER_H, QColor(theme.BG2))
 
     def _sounding_pitches(self) -> Set[int]:
         eng = self.ctl.engine

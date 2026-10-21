@@ -19,7 +19,8 @@ from . import theme
 
 LOW, HIGH = 21, 108          # A0 .. C8, the 88 keys of a piano
 KEYS_H = 76                  # height of the keyboard itself
-MAX_PARTICLES = 900
+MAX_PARTICLES = 900            # the default limit on particles alive at once (the settings allow MIN_LIMIT..MAX_LIMIT)
+MIN_LIMIT, MAX_LIMIT = 100, 4000
 MAX_LAUNCH = 2400            # px/s: the fastest any particle is ever launched
 MAX_HEIGHT = 600             # the tallest effect area the settings allow (px)
 BLACK_KEY_W = 0.62           # a black key is this share of a white key's width
@@ -29,6 +30,11 @@ SHIMMER_TIME = 0.55          # how long a star takes to shimmer away (s)
 TRAIL_LEN = 9                # points kept behind a particle for its trail
 SPRITE = 128                 # pixels across the pre-rendered soft shapes
 SPRITE_RECT = QRectF(0, 0, SPRITE, SPRITE)
+LEAVE_TIME = 0.5             # how long a particle sent away to make room takes to fade out (slowly at first, then quickly)
+HARD_CEILING = 2.5           # particles on screen (including those leaving) are never allowed beyond this many times the limit
+LEAVE_SPREAD = 0.6           # a crowd sent away together leaves over this long: a few at first, then faster and faster
+FLASH_TIME = 0.09            # a note shorter than this still lights its key this long
+MAX_LAG = 0.12               # a note-on that arrives this late is caught up (never further) so effects keep pace
 SLOW_PAINT = 0.011           # a paint slower than this (s, smoothed) makes the effects shed detail ...
 FAST_PAINT = 0.004           # ... and one faster than this lets it come back
 TOP_EDGE = 6.0               # a star this close to the top of the effect area shimmers away
@@ -138,6 +144,7 @@ class FxConfig:
     color_mode: str = "channel"
     color: str = "#ffffff"     # used by color_mode == "custom"
     height: int = 110          # headroom above the keys (px), up to MAX_HEIGHT
+    max_particles: int = MAX_PARTICLES   # the most particles alive at once; when full, the oldest make way for new notes
     held_glow: bool = False    # a soft glow above a key for as long as it is held
     pitch_color: bool = False  # colour by pitch (low = red ... high = violet) instead of the colour setting
     velocity: bool = False     # harder notes make more, bigger, faster / longer effects
@@ -179,6 +186,7 @@ class FxConfig:
         cfg.gravity = max(-100, min(100, cfg.gravity))
         cfg.bounce = max(0.0, min(1.5, cfg.bounce))
         cfg.glow_amount = max(0.0, min(3.0, cfg.glow_amount))
+        cfg.max_particles = max(MIN_LIMIT, min(MAX_LIMIT, cfg.max_particles))
         cfg.height = max(20, min(MAX_HEIGHT, cfg.height))
         return cfg
 
@@ -189,7 +197,7 @@ class _Clump:
 
 
 class _Particle:
-    __slots__ = ("x", "y", "vx", "vy", "age", "ttl", "size", "color", "rot", "spin", "phase", "bf", "df", "pop", "popt", "slope", "landed", "clump", "rect", "fuse", "shim", "shim_at", "pts", "trail", "rocket", "power", "ox", "gf", "streak", "sprite")
+    __slots__ = ("x", "y", "vx", "vy", "age", "ttl", "size", "color", "rot", "spin", "phase", "bf", "df", "pop", "popt", "slope", "landed", "clump", "rect", "fuse", "shim", "shim_at", "pts", "trail", "rocket", "power", "ox", "gf", "streak", "sprite", "out", "leave", "wait")
 
     def __init__(self, x, y, vx, vy, ttl, size, color, rot, spin, phase):
         self.x, self.y, self.vx, self.vy = x, y, vx, vy
@@ -200,6 +208,9 @@ class _Particle:
         self.shim_at = 0.0                    # stars: age at which it shimmers away (it also does at the top edge)
         self.ox = x                           # where it started (fireflies stay within reach of it)
         self.gf = 1.0                         # scales gravity (fireworks: shaped bursts fall gently)
+        self.out = False                      # being sent away to make room (it leaves in its effect's own way)
+        self.wait = 0.0                       # seconds until it actually starts leaving (a crowd leaves one after another)
+        self.leave = -1.0                     # seconds into a plain fade-out (-1 = not fading)
         self.sprite = None                    # lightning: the bolt, pre-rendered
         self.streak = False                   # always draws a trail (willow fireworks), whatever the Trails setting
         self.pts = None                       # lightning: the bolt's polylines (a bolt has no motion)
@@ -233,8 +244,11 @@ class PianoStrip(QWidget):
         self._glow: Dict[int, list] = {}       # held-note glow: pitch -> [level 0..1, colour, strength]
         self._sprites: Dict[tuple, QPixmap] = {}   # pre-rendered soft shapes (steam puffs, glows), by colour
         self._paint_ema = 0.0                  # smoothed time a paint takes (s)
+        self._leaving = 0                      # how many particles are on their way out (they do not count towards the limit)
         self._quality = 0                      # 0 full detail, 1 no trails, 2 also half the particles per note (glow is never shed)
         self._q_wait = 0                       # frames to wait before the quality may change again
+        self.event_source = None               # callable -> new note-ons [(time, pitch, channel, velocity)] (set by the main window)
+        self._flash: Dict[int, list] = {}      # pitch -> [channel, expire time]: a key that only just sounded and is already gone
         self.velocity_of = None                # callable pitch -> MIDI velocity (set by the main window)
         self._t = 0.0
         self._demo: Dict[int, int] = {}
@@ -256,6 +270,7 @@ class PianoStrip(QWidget):
     def set_fx(self, cfg: FxConfig):
         if cfg.kind != self.fx.kind:               # a different effect: the old one's particles follow other physics - clear them
             self._particles.clear()
+            self._leaving = 0
             self._clump_cur.clear()
         self.fx = cfg
         self._refresh()
@@ -270,6 +285,8 @@ class PianoStrip(QWidget):
             self._particles.clear()
             self._clump_cur.clear()
             self._glow.clear()
+            self._flash.clear()
+            self._leaving = 0
             self._timer.stop()
         else:
             self._ensure_timer()
@@ -312,21 +329,52 @@ class PianoStrip(QWidget):
         self._set_notes(dict(active))
 
     def _set_notes(self, notes: Dict[int, int]):
-        shown = {**notes, **self._demo}
+        shown = {**{p: f[0] for p, f in self._flash.items()}, **notes, **self._demo}
         if shown == self._active:
             return
         if self.effects_on():
             for pitch, ch in shown.items():
                 if pitch not in self._active and LOW <= pitch <= HIGH:
                     self._glow_hit(pitch, ch)
-                    self._burst(pitch, ch, round(KINDS[self.fx.kind]["burst"] * self.fx.amount))
+                    if pitch in self._demo or (self.event_source is None and pitch not in self._flash):   # (real notes burst from their events)
+                        self._burst(pitch, ch, round(KINDS[self.fx.kind]["burst"] * self.fx.amount))
         self._notes = notes
         self._active = shown
         self._ensure_timer()
         self.update()
 
+    def note_events(self, events):
+        """New note-ons, each with the time it started. Every one makes its own burst right away - however short the note,
+        and however many arrive together - and a late one is advanced by how late it is, so a stalled frame does not turn
+        into a clump of particles all appearing at once."""
+        if not events:
+            return
+        now = time.perf_counter()
+        if not self.effects_on():
+            return
+        flash_changed = False
+        for t, pitch, ch, vel in events:
+            lag = now - t
+            if lag > 1.0 or not LOW <= pitch <= HIGH:                  # stale (e.g. from while the effects were hidden)
+                continue
+            if pitch not in self._notes and pitch not in self._demo:   # gone already (or about to be): keep the key lit a moment
+                self._flash[pitch] = [ch, now + FLASH_TIME]
+                flash_changed = True
+            self._glow_hit(pitch, ch, vel)
+            self._burst(pitch, ch, round(KINDS[self.fx.kind]["burst"] * self.fx.amount), vel=vel, lag=min(MAX_LAG, max(0.0, lag)))
+        if flash_changed:
+            self._set_notes(self._notes)
+        self._ensure_timer()
+
+    def _drain_events(self):
+        if self.event_source is not None:
+            try:
+                self.note_events(self.event_source())
+            except Exception:
+                pass
+
     def _ensure_timer(self):
-        if self.effects_on() and (self._active or self._particles or self._glow) and not self._timer.isActive():
+        if self.effects_on() and (self._active or self._particles or self._glow or self.event_source is not None) and not self._timer.isActive():
             self._last = time.perf_counter()
             self._timer.start()
 
@@ -363,45 +411,52 @@ class PianoStrip(QWidget):
             return self._base_color(pitch, ch)
         return QColor(CHANNEL_COLORS[ch])
 
-    def _vel_norm(self, pitch: int) -> float:
+    def _vel_norm(self, pitch: int, vel=None) -> float:
         """How hard a note was struck, relative to a normal one (1.0 at velocity 90); 1.0 when scaling is off."""
         if not self.fx.velocity:
             return 1.0
-        try:
-            v = self.velocity_of(pitch) if self.velocity_of else 90
-        except Exception:
-            v = 90
+        v = vel
+        if v is None:
+            try:
+                v = self.velocity_of(pitch) if self.velocity_of else 90
+            except Exception:
+                v = 90
         return max(0.3, min(1.4, v / 90.0))
 
-    def _glow_hit(self, pitch: int, ch: int):
+    def _glow_hit(self, pitch: int, ch: int, vel=None):
         """A key goes down: its glow takes this note's colour and strength (and keeps any level it still has)."""
         if not self.fx.held_glow:
             return None
         g = self._glow.get(pitch)
         if g is None:
             g = self._glow[pitch] = [0.0, QColor(), 1.0]
-        g[1], g[2] = self._base_color(pitch, ch), self._vel_norm(pitch)
+        g[1], g[2] = self._base_color(pitch, ch), self._vel_norm(pitch, vel)
         return g
 
-    def _burst(self, pitch: int, ch: int, n: int, hold: bool = False):
+    def _burst(self, pitch: int, ch: int, n: int, hold: bool = False, vel=None, lag: float = 0.0):
         span = self._key_span(pitch)
-        limit = MAX_PARTICLES if self._quality < 2 else MAX_PARTICLES // 3
-        if n <= 0 or span is None or len(self._particles) > limit or not self.effects_on():
+        limit = self.fx.max_particles if self._quality < 2 else self.fx.max_particles // 3
+        if n <= 0 or span is None or not self.effects_on():
             return
+        over = len(self._particles) - min(self._leaving, len(self._particles)) + n - limit
+        if over > 0:
+            if hold:                                                   # a held key just waits for room...
+                return
+            self._make_room(over, limit)                               # ...but a new note always gets its burst: the oldest go
         lo, hi = span
         margin = (hi - lo) * EMIT_MARGIN
         lo, hi = lo + margin, hi - margin
         k, fx = KINDS[self.fx.kind], self.fx
         base = self._color_for(pitch, ch)
         y = self._key_top() - 1
-        vn = self._vel_norm(pitch)                                     # harder notes: more, bigger, faster
+        vn = self._vel_norm(pitch, vel)                                # harder notes: more, bigger, faster
         if not hold and fx.velocity:
             n = max(1, round(n * vn))
         if self._quality >= 2 and n > 1:                               # struggling: fewer particles per note
             n = max(1, n // 2)
         if k.get("bolt"):
             for _ in range(n + (random.randint(0, 1) if hold else 0)):
-                self._bolt(lo, hi, y, base, hold, vn)
+                self._bolt(lo, hi, y, base, hold, vn, lag)
             return
         for _ in range(n):
             ang = random.uniform(-math.pi / 2 - k["spread"], -math.pi / 2 + k["spread"])
@@ -454,9 +509,47 @@ class PianoStrip(QWidget):
                 p.bf, p.df = 0.3, 1.8
             if k.get("pop"):                                           # float up to a random height, then burst
                 p.pop = max(4.0, y - random.uniform(0.3, 0.95) * max(30.0, y - 6.0))
+            if lag > 0.0:                                                      # a late note: start it where it would be by now
+                p.age += lag
+                p.x += p.vx * lag
+                p.y += p.vy * lag
             self._particles.append(p)
 
-    def _bolt(self, lo: float, hi: float, y: float, color: QColor, hold: bool, vn: float):
+    def _make_room(self, count: int, limit: int):
+        """Send the *count* oldest particles away - each in its effect's own way (stars shimmer, bubbles pop, rockets burst,
+        the rest fade) - instead of cutting them out."""
+        chosen = []
+        for p in self._particles:
+            if len(chosen) >= count:
+                break
+            if not p.out:
+                chosen.append(p)
+        total = len(chosen)
+        for i, p in enumerate(chosen):                                  # oldest first, on a curve: slow at the start, then faster
+            p.out = True
+            p.wait = LEAVE_SPREAD * math.sqrt((i + 0.5) / total)        # (the number gone grows with the square of the time)
+            self._leaving += 1
+
+    def _exit(self, p: _Particle, k: dict):
+        """It is this particle's turn to go: in its effect's own way."""
+        if k.get("shimmer") and p.shim > -1.5:                          # stars: shimmer away (and shed glitter)
+            if p.shim < 0.0:
+                p.shim_at = max(p.age, 1e-4)
+            return
+        if k.get("pop") and p.popt < 0.0:                               # bubbles: pop
+            p.pop = 1e9
+            return
+        if p.rocket:                                                    # a rocket still climbing: burst now
+            p.vy = 0.0
+            return
+        if k.get("pop_chance") and not p.fuse and random.random() < 0.3:   # some sparks pop away
+            p.fuse = max(p.age, 1e-4)
+            return
+        if p.shim == -2.0 or p.popt >= 0.0 or p.shim >= 0.0:            # already on its way out in its own way
+            return
+        p.leave = 0.0                                                   # everything else fades out
+
+    def _bolt(self, lo: float, hi: float, y: float, color: QColor, hold: bool, vn: float, lag: float = 0.0):
         """A lightning bolt: a jagged line climbing from a key, with a few short side branches."""
         fx, k = self.fx, KINDS["lightning"]
         x = random.uniform(lo, hi)
@@ -469,20 +562,21 @@ class PianoStrip(QWidget):
         cx, cy = x, y
         lean = random.uniform(-0.4, 0.4)                                # each bolt leans its own way
         while y - cy < reach:
-            cy -= seg * random.uniform(0.7, 1.3)
+            cy = max(2.0, cy - seg * random.uniform(0.7, 1.3))             # (never above the top of the area)
             cx = max(0.0, min(width, cx + (random.uniform(-1.0, 1.0) * 0.9 + lean) * seg))
             main.append((cx, cy))
             if random.random() < 0.22 and y - cy < reach * 0.85:       # a side branch
                 side, bx, by, br = random.choice((-1, 1)), cx, cy, [(cx, cy)]
                 for _ in range(random.randint(2, 4)):
                     bx = max(0.0, min(width, bx + side * seg * random.uniform(0.4, 1.0)))
-                    by -= seg * random.uniform(0.2, 0.7)
+                    by = max(2.0, by - seg * random.uniform(0.2, 0.7))
                     br.append((bx, by))
                 lines.append(br)
         lines.insert(0, main)
         p = _Particle(x, y, 0.0, 0.0, random.uniform(*k["ttl"]) * fx.life, random.uniform(*k["size"]) * fx.size,
                       QColor(color), 0.0, 0.0, random.uniform(0, math.tau))
         p.pts = lines
+        p.age = min(lag, p.ttl * 0.6)
         self._particles.append(p)
 
     @staticmethod
@@ -608,6 +702,9 @@ class PianoStrip(QWidget):
         now = time.perf_counter()
         dt = min(0.05, now - self._last)
         self._last = now
+        self._drain_events()
+        if self.event_source is not None and not (self._active or self._particles or self._glow or self._flash):
+            return                                                     # idle: nothing to animate, nothing to repaint
         self.step(dt)
 
     def step(self, dt: float):
@@ -615,6 +712,7 @@ class PianoStrip(QWidget):
         if not self.effects_on():                  # nothing to animate while the effects are hidden
             self._particles.clear()
             self._glow.clear()
+            self._flash.clear()
             self._timer.stop()
             return
         k, fx = KINDS[self.fx.kind], self.fx
@@ -659,8 +757,19 @@ class PianoStrip(QWidget):
         spawned: list = []
         alive = []
         trails = fx.trails
+        leaving = 0
         for p in self._particles:
             p.age += dt
+            if p.wait > 0.0:                               # sent away to make room, but waiting its turn
+                p.wait -= dt
+                if p.wait <= 0.0:
+                    self._exit(p, k)
+            if p.leave >= 0.0:                             # its turn came: fades out, then goes
+                p.leave += dt
+                if p.leave >= LEAVE_TIME:
+                    continue
+            if p.out:
+                leaving += 1
             if p.pts is not None:                          # a lightning bolt: it only flashes, then goes
                 if p.age < p.ttl:
                     alive.append(p)
@@ -672,7 +781,8 @@ class PianoStrip(QWidget):
                         continue
                 elif p.y <= TOP_EDGE or (p.shim_at and p.age >= p.shim_at) or p.age >= p.ttl:
                     p.shim = 0.0
-                    self._sparkle(p, spawned)
+                    if not p.out or random.random() < 0.35:   # (fewer glitter bursts when many are leaving at once)
+                        self._sparkle(p, spawned)
             elif pops:
                 if p.popt >= 0.0:                          # bursting: stays put while the pop plays
                     p.popt += dt
@@ -750,10 +860,18 @@ class PianoStrip(QWidget):
                 p.rot += p.spin * dt
             if -40 < p.y < height + 20 and -30 < p.x < width + 30:
                 alive.append(p)
-        room = max(0, int(MAX_PARTICLES * 1.2) - len(alive))
-        alive.extend(spawned[:room])
+        self._leaving = leaving
+        hard = int(fx.max_particles * HARD_CEILING)                # a last-resort ceiling, far above the limit: crowds leave on
+        alive.extend(spawned[:max(0, hard - len(alive))])          # their curve long before it (bursts and pops use the headroom)
         self._particles = alive
-        if not self._particles and not self._active and not self._glow:
+        if self._flash:                                            # short notes: their key goes dark once the flash is over
+            now = time.perf_counter()
+            gone = [p for p, f in self._flash.items() if f[1] <= now]
+            for p in gone:
+                del self._flash[p]
+            if gone:
+                self._set_notes(self._notes)
+        if not self._particles and not self._active and not self._glow and self.event_source is None:
             self._timer.stop()
         self.update()
 
@@ -920,6 +1038,8 @@ class PianoStrip(QWidget):
                 s = s * s * (3.0 - 2.0 * s)
                 life *= 0.015 + 0.985 * s
                 r *= 0.55 + 0.45 * s
+            if q.leave >= 0.0:                                              # sent away to make room: fading out
+                life *= max(0.0, 1.0 - (q.leave / LEAVE_TIME) ** 2)       # (slow at first, then quickly)
             tr = q.trail
             if tr and len(tr) > 1 and (want_trails or q.rocket or q.streak):  # a fading streak behind it: faint thin tail, then a
                 n = len(tr)                                                 # stronger thicker head (two strokes, not one per step)
@@ -990,6 +1110,8 @@ class PianoStrip(QWidget):
         drawn once into a picture; each frame only fades that picture."""
         t = q.age / max(0.01, q.ttl)
         a = (1.0 - t) ** 0.8 * (0.55 + 0.45 * abs(math.sin(q.age * 110.0 + q.phase)))
+        if q.leave >= 0.0:
+            a *= max(0.0, 1.0 - (q.leave / LEAVE_TIME) ** 2)
         if q.sprite is None:
             q.sprite = self._render_bolt(q)
         pm, x0, y0 = q.sprite

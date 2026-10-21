@@ -3,6 +3,7 @@ shuffle / repeat, save / load M3U."""
 from __future__ import annotations
 
 import os
+import time
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont
@@ -81,6 +82,9 @@ class PlaylistView(QWidget):
         super().__init__(parent)
         self.pl = playlist
         self._last_dir = os.path.expanduser("~")
+        self._exists: dict = {}                 # path -> (when checked, exists)
+        self._built: list = []                  # the playlist items the rows were built from
+        self._styled_current = -1               # the row currently styled as the playing one
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(8)
@@ -255,16 +259,55 @@ class PlaylistView(QWidget):
 
     # -------------------------------------------------------------- view
     def rebuild(self):
+        self.tree.setUpdatesEnabled(False)               # (one repaint at the end, not one per row)
+        try:
+            self._rebuild_rows()
+        finally:
+            self.tree.setUpdatesEnabled(True)
+
+    def _file_exists(self, path: str) -> bool:
+        """os.path.exists, remembered for a few seconds: the list is rebuilt often and a stat per song adds up."""
+        now = time.monotonic()
+        hit = self._exists.get(path)
+        if hit is not None and now - hit[0] < 8.0:
+            return hit[1]
+        ok = os.path.exists(path)
+        if len(self._exists) > 20000:
+            self._exists.clear()
+        self._exists[path] = (now, ok)
+        return ok
+
+    def _style_row(self, w: QTreeWidgetItem, i: int, it: PlaylistItem, bold: QFont):
+        """Number column + colours + font of one row: the current song is bold, accent coloured and marked with a play arrow,
+        a missing file is red."""
+        current = i == self.pl.current
+        for c in range(3):
+            w.setData(c, Qt.FontRole, None)
+            w.setData(c, Qt.ForegroundRole, None)
+        if not self._file_exists(it.path):
+            for c in range(3):
+                w.setForeground(c, QColor(theme.DANGER))
+        if current:
+            for c in range(3):
+                w.setFont(c, bold)
+                w.setForeground(c, QColor(theme.ACCENT2))
+        w.setText(0, "▶" if current else str(i + 1))
+
+    def _rebuild_rows(self):
         self.tree.clear()
         bold = QFont(self.tree.font())
         bold.setBold(True)
+        align = Qt.AlignRight | Qt.AlignVCenter
+        flags = None
         for i, it in enumerate(self.pl.items):
             w = QTreeWidgetItem([str(i + 1), it.title, fmt_time(it.duration) if it.duration else ""])
             w.setData(0, ROLE, it)
             w.setToolTip(1, it.path)
-            w.setTextAlignment(2, Qt.AlignRight | Qt.AlignVCenter)
-            w.setFlags((w.flags() | Qt.ItemIsDragEnabled) & ~Qt.ItemIsDropEnabled)
-            if not os.path.exists(it.path):
+            w.setTextAlignment(2, align)
+            if flags is None:
+                flags = (w.flags() | Qt.ItemIsDragEnabled) & ~Qt.ItemIsDropEnabled
+            w.setFlags(flags)
+            if not self._file_exists(it.path):
                 for c in range(3):
                     w.setForeground(c, QColor(theme.DANGER))
             if i == self.pl.current:
@@ -273,6 +316,8 @@ class PlaylistView(QWidget):
                     w.setForeground(c, QColor(theme.ACCENT2))
                 w.setText(0, "▶")
             self.tree.addTopLevelItem(w)
+        self._built = list(self.pl.items)
+        self._styled_current = self.pl.current
         self._apply_filter(self.search.text())
         self._sync_buttons()
         self._update_summary()
@@ -280,7 +325,24 @@ class PlaylistView(QWidget):
             self._dur_timer.start()
 
     def highlight_current(self):
-        self.rebuild()
+        """The song changed: restyle just the row that was current and the one that is now, instead of rebuilding the whole
+        list (which with thousands of songs was a visible hitch at every song change)."""
+        items = self.pl.items
+        built = self._built
+        if (len(built) == len(items) == self.tree.topLevelItemCount()
+                and all(a is b for a, b in zip(built, items))):
+            bold = QFont(self.tree.font())
+            bold.setBold(True)
+            for i in {self._styled_current, self.pl.current}:
+                if 0 <= i < len(items):
+                    w = self.tree.topLevelItem(i)
+                    if w is not None:
+                        self._style_row(w, i, items[i], bold)
+            self._styled_current = self.pl.current
+            if not self._dur_timer.isActive() and any(it.duration is None for it in items):
+                self._dur_timer.start()                   # (as a rebuild would: some lengths are still to be worked out)
+        else:
+            self.rebuild()
         item = self.tree.topLevelItem(self.pl.current) if self.pl.current >= 0 else None
         if item:
             self.tree.scrollToItem(item)
@@ -298,6 +360,7 @@ class PlaylistView(QWidget):
 
     def _compute_some_durations(self):
         done = 0
+        deadline = time.perf_counter() + 0.008          # (as many as fit in ~8 ms, at least one: keeps the window responsive)
         for i, it in enumerate(self.pl.items):
             if it.duration is None:
                 try:
@@ -308,7 +371,7 @@ class PlaylistView(QWidget):
                 if w is not None:
                     w.setText(2, fmt_time(it.duration) if it.duration else "—")
                 done += 1
-                if done >= 3:
+                if done >= 3 or time.perf_counter() >= deadline:
                     break
         if not done:
             self._dur_timer.stop()
