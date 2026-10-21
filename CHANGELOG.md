@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.2
+- **Held-note glow:** it is now smaller and a fixed size - it no longer grows with the effect height. Its brightness still follows the Glow strength slider and, with velocity scaling on, how hard the note was played.
+- **Velocity strength slider** (View > Piano effects): sets how strongly velocity scaling acts, from 0x (no difference) to 3x. Velocity scaling itself is also much stronger at the default: soft notes make few, small, dim particles, hard notes many big bright ones, longer lightning and wider fireworks.
+- **Fix:** cached glow and particle pictures are now kept per kind, so a busy rainbow-coloured piano no longer clears them all at once.
+
 ## 1.3.1
 - **Effects come out with every note:** each note-on now makes its own burst the moment it plays, even very short notes and quick repeats of the same key (before, effects only noticed keys about 30 times a second, so they appeared in batches and some notes were missed). Short notes still light their key briefly.
 - **No more silent stretches in busy music:** when the screen was full of particles, new notes were dropped. A new note now always gets its burst; the oldest particles make way.

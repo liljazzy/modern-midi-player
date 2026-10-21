@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, fields
 from typing import Dict, List
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF, QRadialGradient
+from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen, QPixmap, QPolygonF, QRadialGradient
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from ..gm import BLACK_KEYS, CHANNEL_COLORS
@@ -30,6 +30,15 @@ SHIMMER_TIME = 0.55          # how long a star takes to shimmer away (s)
 TRAIL_LEN = 9                # points kept behind a particle for its trail
 SPRITE = 128                 # pixels across the pre-rendered soft shapes
 SPRITE_RECT = QRectF(0, 0, SPRITE, SPRITE)
+GLOW_REACH = 58.0             # how far (px) the held-note glow's spikes (when enabled) rise above a key, whatever the effect height
+SOFT_REACH = 44.0             # how far the held-note glow's soft light reaches above a key (the old, round glow, smaller)
+SOFT_WIDTH = 0.95             # ...and how far it spreads sideways, in key widths each side
+SPIKES_ENABLED = False        # the spiky rays over the soft glow are switched off for now (the code is kept; set True to bring them back)
+SPIKE_ALPHA = 0.55            # the spikes are drawn at this share of full strength
+SPIKE_FRAMES = 4              # the glow's spikes flicker between this many pre-drawn patterns...
+SPIKE_LEVELS = 4              # ...for each of this many loudness levels (quiet notes get a few short rays, loud ones many long ones)
+SPIKE_SIZE = 96               # pixels across a spike picture
+SPRITE_CAPS = {"spike": 400, "halo": 256, "puff": 256, "glow": 128}      # most pictures kept per kind (each kind is cleared on its own)
 LEAVE_TIME = 0.5             # how long a particle sent away to make room takes to fade out (slowly at first, then quickly)
 HARD_CEILING = 2.5           # particles on screen (including those leaving) are never allowed beyond this many times the limit
 LEAVE_SPREAD = 0.6           # a crowd sent away together leaves over this long: a few at first, then faster and faster
@@ -148,6 +157,7 @@ class FxConfig:
     held_glow: bool = False    # a soft glow above a key for as long as it is held
     pitch_color: bool = False  # colour by pitch (low = red ... high = violet) instead of the colour setting
     velocity: bool = False     # harder notes make more, bigger, faster / longer effects
+    velocity_amount: float = 1.0   # how strongly: 0 = no difference, 1 = normal, 3 = extreme
     trails: bool = False       # particles leave a short fading streak behind them
     pattern: str = "random"    # fireworks: the burst shape ("random" = a different one each time)
 
@@ -186,6 +196,7 @@ class FxConfig:
         cfg.gravity = max(-100, min(100, cfg.gravity))
         cfg.bounce = max(0.0, min(1.5, cfg.bounce))
         cfg.glow_amount = max(0.0, min(3.0, cfg.glow_amount))
+        cfg.velocity_amount = max(0.0, min(3.0, cfg.velocity_amount))
         cfg.max_particles = max(MIN_LIMIT, min(MAX_LIMIT, cfg.max_particles))
         cfg.height = max(20, min(MAX_HEIGHT, cfg.height))
         return cfg
@@ -241,8 +252,9 @@ class PianoStrip(QWidget):
         self._white_index = {pitch: i for i, pitch in enumerate(self._whites)}
         self._particles: List[_Particle] = []
         self._clump_cur: Dict[int, _Clump] = {}   # the clump each held key is currently feeding
-        self._glow: Dict[int, list] = {}       # held-note glow: pitch -> [level 0..1, colour, strength]
+        self._glow: Dict[int, list] = {}       # held-note glow: pitch -> [level 0..1, colour, strength, loudness 0..1]
         self._sprites: Dict[tuple, QPixmap] = {}   # pre-rendered soft shapes (steam puffs, glows), by colour
+        self._sprite_n: Dict[str, int] = {}     # how many of each kind are in it
         self._paint_ema = 0.0                  # smoothed time a paint takes (s)
         self._leaving = 0                      # how many particles are on their way out (they do not count towards the limit)
         self._quality = 0                      # 0 full detail, 1 no trails, 2 also half the particles per note (glow is never shed)
@@ -335,7 +347,8 @@ class PianoStrip(QWidget):
         if self.effects_on():
             for pitch, ch in shown.items():
                 if pitch not in self._active and LOW <= pitch <= HIGH:
-                    self._glow_hit(pitch, ch)
+                    if pitch not in self._flash:                              # (a flash pitch was already hit by its own event)
+                        self._glow_hit(pitch, ch)
                     if pitch in self._demo or (self.event_source is None and pitch not in self._flash):   # (real notes burst from their events)
                         self._burst(pitch, ch, round(KINDS[self.fx.kind]["burst"] * self.fx.amount))
         self._notes = notes
@@ -412,7 +425,8 @@ class PianoStrip(QWidget):
         return QColor(CHANNEL_COLORS[ch])
 
     def _vel_norm(self, pitch: int, vel=None) -> float:
-        """How hard a note was struck, relative to a normal one (1.0 at velocity 90); 1.0 when scaling is off."""
+        """How hard a note was struck, relative to a normal one (1.0 at velocity 90, about 0.2 for a whisper, 1.7 at the top);
+        1.0 when scaling is off."""
         if not self.fx.velocity:
             return 1.0
         v = vel
@@ -421,7 +435,22 @@ class PianoStrip(QWidget):
                 v = self.velocity_of(pitch) if self.velocity_of else 90
             except Exception:
                 v = 90
-        return max(0.3, min(1.4, v / 90.0))
+        vn = max(0.2, min(1.8, (v / 90.0) ** 1.5))
+        return max(0.1, min(3.0, 1.0 + (vn - 1.0) * self.fx.velocity_amount))     # (the slider stretches it around 'normal')
+
+    def _loudness(self, pitch: int, vel=None) -> float:
+        """How loud a note is, 0..1 (its MIDI velocity), for the glow's spikes. Unlike velocity scaling this always applies;
+        the Velocity strength slider only exaggerates or flattens it when scaling is on."""
+        v = vel
+        if v is None:
+            try:
+                v = self.velocity_of(pitch) if self.velocity_of else 90
+            except Exception:
+                v = 90
+        t = max(0.0, min(1.0, v / 127.0))
+        if self.fx.velocity:
+            t = max(0.0, min(1.0, 0.5 + (t - 0.5) * self.fx.velocity_amount))
+        return t
 
     def _glow_hit(self, pitch: int, ch: int, vel=None):
         """A key goes down: its glow takes this note's colour and strength (and keeps any level it still has)."""
@@ -429,8 +458,8 @@ class PianoStrip(QWidget):
             return None
         g = self._glow.get(pitch)
         if g is None:
-            g = self._glow[pitch] = [0.0, QColor(), 1.0]
-        g[1], g[2] = self._base_color(pitch, ch), self._vel_norm(pitch, vel)
+            g = self._glow[pitch] = [0.0, QColor(), 1.0, 0.7]
+        g[1], g[2], g[3] = self._base_color(pitch, ch), self._vel_norm(pitch, vel), self._loudness(pitch, vel)
         return g
 
     def _burst(self, pitch: int, ch: int, n: int, hold: bool = False, vel=None, lag: float = 0.0):
@@ -480,14 +509,14 @@ class PianoStrip(QWidget):
                 v = math.sqrt(2.0 * g * height) * 1.12 / max(0.3, math.cos(off)) * fx.speed
             else:
                 v = random.uniform(*k["speed"]) * fx.speed * (0.55 if hold else 1.0)
-            v *= 0.8 + 0.2 * vn
+            v *= min(1.0, 0.6 + 0.4 * vn) if (k.get("apex") or k.get("rocket")) else min(1.5, 0.6 + 0.4 * vn)
             if k.get("scale_h"):
                 v *= max(0.6, min(6.0, y / 110.0))
             v = min(v, MAX_LAUNCH)
             c = QColor(base) if (fx.color_mode == "rainbow" and not fx.pitch_color) else QColor(base).lighter(random.randint(100, 150))
             p = _Particle(
                 random.uniform(lo, hi), y, math.cos(ang) * v, math.sin(ang) * v,       # (anywhere across the key)
-                random.uniform(*k["ttl"]) * fx.life, random.uniform(*k["size"]) * fx.size * (0.75 + 0.25 * vn), c,
+                random.uniform(*k["ttl"]) * fx.life, random.uniform(*k["size"]) * fx.size * (0.5 + 0.5 * vn), c,
                 random.uniform(0, math.tau), random.uniform(-6, 6), random.uniform(0, math.tau))
             if k.get("key_color"):                                      # steam: exactly the colour of the key
                 p.color = QColor(self._key_color(pitch, ch))
@@ -553,7 +582,7 @@ class PianoStrip(QWidget):
         """A lightning bolt: a jagged line climbing from a key, with a few short side branches."""
         fx, k = self.fx, KINDS["lightning"]
         x = random.uniform(lo, hi)
-        reach = min(y - 4.0, y * random.uniform(0.55, 0.97) * (0.6 if hold else 1.0) * min(1.25, 0.6 + 0.4 * vn))
+        reach = min(y - 4.0, y * random.uniform(0.55, 0.97) * (0.6 if hold else 1.0) * min(1.2, 0.35 + 0.65 * vn))
         if reach < 8.0:
             return
         seg = max(8.0, min(22.0, reach / 9.0))
@@ -615,7 +644,7 @@ class PianoStrip(QWidget):
         """A rocket reaches the top of its flight and bursts - in the chosen pattern (or a random one)."""
         fx, k = self.fx, KINDS["fireworks"]
         name = fx.pattern if fx.pattern in PATTERN_NAMES else random.choice(PATTERN_NAMES)
-        power = 0.8 + 0.2 * p.power
+        power = 0.5 + 0.5 * p.power
         tint = QColor(p.color)
 
         def spark(vx, vy, ttl, size, color, df=1.0, gf=1.0, trail=False, fuse=0.0):
@@ -930,20 +959,30 @@ class PianoStrip(QWidget):
             self._paint_particles(p)
         p.end()
 
-    def _sprite(self, kind: str, col: QColor) -> QPixmap:
+    def _sprite(self, kind: str, col: QColor, variant: int = 0) -> QPixmap:
         """A soft round shape in *col*, rendered once and then just scaled and blended (much cheaper than a gradient or a
         big antialiased ellipse for every particle on every frame)."""
-        key = (kind, col.red() >> 3, col.green() >> 3, col.blue() >> 3)
+        shift = 3 if kind in ("puff", "glow") else 4                    # (the many-coloured kinds use coarser colour buckets)
+        key = (kind, variant, col.red() >> shift, col.green() >> shift, col.blue() >> shift)
         pm = self._sprites.get(key)
         if pm is None:
-            if len(self._sprites) > 400:
-                self._sprites.clear()
-            size = SPRITE
+            same = [k for k in self._sprites if k[0] == kind] if self._sprite_n.get(kind, 0) >= SPRITE_CAPS.get(kind, 256) else None
+            if same:                                                    # this kind has filled its share of the cache: start it over
+                for k in same:                                          # (the other kinds keep their pictures)
+                    del self._sprites[k]
+                self._sprite_n[kind] = 0
+            self._sprite_n[kind] = self._sprite_n.get(kind, 0) + 1
+            size = SPIKE_SIZE if kind == "spike" else SPRITE
             pm = QPixmap(size, size)
             pm.fill(Qt.transparent)
             q = QPainter(pm)
             q.setRenderHint(QPainter.Antialiasing, True)
             q.setPen(Qt.NoPen)
+            if kind == "spike":                                          # held-note glow: a small bright core with spiky rays
+                self._draw_spikes(q, col, variant, size)
+                q.end()
+                self._sprites[key] = pm
+                return pm
             if kind == "puff":
                 grad = QRadialGradient(QPointF(size / 2, size / 2), size / 2)
                 for stop, mul in ((0.0, 1.0), (0.5, 0.5), (1.0, 0.0)):
@@ -970,9 +1009,51 @@ class PianoStrip(QWidget):
             self._sprites[key] = pm
         return pm
 
+    @staticmethod
+    def _draw_spikes(q: QPainter, col: QColor, variant: int, size: int):
+        """The held-note glow picture: a small bright core and a fan of thin, tapering rays (each with a hot white centre)
+        above the bottom-centre of the picture, which is where the key's top edge goes. *variant* picks a loudness level
+        (quiet: few short rays; loud: many long ones) and one of several flicker patterns, so it can twinkle."""
+        level, frame = divmod(variant, SPIKE_FRAMES)
+        f = size / 128.0
+        ox, oy = size / 2.0, size - 1.0
+        rng = random.Random(variant * 977 + 13)
+        core_r = (20.0 + 10.0 * level / max(1, SPIKE_LEVELS - 1)) * f
+        core = QRadialGradient(QPointF(ox, oy), core_r)
+        for stop, mul in ((0.0, 1.0), (0.35, 0.55), (1.0, 0.0)):
+            c = QColor(col)
+            c.setAlphaF(mul)
+            core.setColorAt(stop, c)
+        q.setBrush(QBrush(core))
+        q.drawEllipse(QPointF(ox, oy), core_r, core_r)
+        hot = QColor(col).lighter(180)
+        share = level / max(1, SPIKE_LEVELS - 1)                         # 0 = quietest .. 1 = loudest
+        n = int(round(5 + 8 * share))
+        longest = (0.45 + 0.55 * share) * (size - 6)
+        for i in range(n):
+            t = i / (n - 1) * 2.0 - 1.0                                  # -1 (left) .. 1 (right)
+            ang = t * math.radians(74) + rng.uniform(-0.09, 0.09)       # from straight up
+            length = (1.0 - 0.5 * abs(t)) * rng.uniform(0.5, 1.0) * longest
+            if rng.random() < 0.3:
+                length *= 0.45                                           # a few short stubs between the long spikes
+            length = min(length, (size / 2.0 - 3.0) / max(0.15, abs(math.sin(ang))))   # (stay inside the picture sideways)
+            dx, dy = math.sin(ang), -math.cos(ang)
+            tip = QPointF(ox + dx * length, max(2.0, oy + dy * length))
+            for half, base, alpha in ((rng.uniform(1.8, 3.4) * f, col, 0.9), (rng.uniform(0.6, 1.1) * f, hot, 0.95)):
+                px, py = -dy * half, dx * half
+                poly = QPolygonF([QPointF(ox + px, oy + py), tip, QPointF(ox - px, oy - py)])
+                g = QLinearGradient(QPointF(ox, oy), tip)
+                for stop, mul in ((0.0, alpha), (0.55, alpha * 0.5), (1.0, 0.0)):
+                    c = QColor(base)
+                    c.setAlphaF(mul)
+                    g.setColorAt(stop, c)
+                q.setBrush(QBrush(g))
+                q.drawPolygon(poly)
+
     def _paint_glow(self, p: QPainter, top: float, kw: float):
-        """Held-note glow: a soft light rising from each held key, brighter and taller for harder notes."""
-        reach = min(self.fx.height * 0.55, 150.0)
+        """Held-note glow: a soft round light plus a fan of fainter spikes rising from each held key, brighter and taller for
+        harder notes."""
+        reach = GLOW_REACH                          # (a fixed size: it no longer grows with the effect height)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         p.setCompositionMode(QPainter.CompositionMode_Plus)
@@ -980,16 +1061,30 @@ class PianoStrip(QWidget):
         p.save()
         p.setClipRect(QRectF(0, 0, self.width(), top))
         pulse = 0.92 + 0.08 * math.sin(time.perf_counter() * 7.0)
+        flick = time.perf_counter() * 14.0
         ga = self.fx.glow_amount
-        for pitch, (level, col, strength) in self._glow.items():
+        for pitch, (level, col, strength, loud) in self._glow.items():
             span = self._key_span(pitch)
             if span is None or level <= 0.0:
                 continue
             grow = 0.7 + 0.3 * ga                                       # (a stronger glow is also a little bigger)
-            cx, rx, ry = (span[0] + span[1]) / 2, kw * 1.5 * grow, max(12.0, reach * (0.6 + 0.4 * min(1.4, strength)) * grow)
-            a = max(0.0, min(1.0, 0.7 * level * pulse * min(1.2, 0.5 + 0.5 * strength) * ga))
-            p.setOpacity(a)
-            p.drawPixmap(QRectF(cx - rx, top - ry, rx * 2, ry * 2), self._sprite("glow", col), SPRITE_RECT)
+            cx = (span[0] + span[1]) / 2
+            lvl = level * pulse * min(1.2, 0.35 + 0.65 * strength) * ga
+            # the soft round light underneath (the original glow, smaller)...
+            sry = max(12.0, SOFT_REACH * (0.6 + 0.4 * min(1.4, strength)) * grow)
+            srx = kw * SOFT_WIDTH * grow
+            p.setOpacity(max(0.0, min(1.0, 0.7 * lvl)))
+            p.drawPixmap(QRectF(cx - srx, top - sry, srx * 2, sry * 2), self._sprite("glow", col), SPRITE_RECT)
+            if not SPIKES_ENABLED:
+                continue
+            # ...and the spikes over it, fainter. How many, how long and how bright depend on how loud the note is.
+            ry = max(14.0, reach * (0.4 + 0.9 * loud) * grow)
+            rx = ry * 0.62                                              # (the spikes fan out to about this far each side)
+            p.setOpacity(max(0.0, min(1.0, SPIKE_ALPHA * level * pulse * ga * (0.35 + 0.65 * loud))))
+            lv = min(SPIKE_LEVELS - 1, int(loud * SPIKE_LEVELS))        # which loudness level's picture
+            frame = int(flick + pitch * 3) % SPIKE_FRAMES                # which flicker pattern this key shows right now
+            pm = self._sprite("spike", col, lv * SPIKE_FRAMES + frame)
+            p.drawPixmap(QRectF(cx - rx, top - ry, rx * 2, ry), pm, QRectF(0, 0, pm.width(), pm.height()))
         p.setOpacity(1.0)
         p.restore()
         p.setCompositionMode(QPainter.CompositionMode_SourceOver)
@@ -1038,6 +1133,8 @@ class PianoStrip(QWidget):
                 s = s * s * (3.0 - 2.0 * s)
                 life *= 0.015 + 0.985 * s
                 r *= 0.55 + 0.45 * s
+            if q.power != 1.0:                                              # velocity scaling: soft notes are dimmer
+                life *= min(1.0, 0.45 + 0.55 * q.power)
             if q.leave >= 0.0:                                              # sent away to make room: fading out
                 life *= max(0.0, 1.0 - (q.leave / LEAVE_TIME) ** 2)       # (slow at first, then quickly)
             tr = q.trail
