@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import bisect
 import os
+import random
 import sys
 import threading
 import time
@@ -23,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 from .backends import Backend, NullBackend
+from .humanize import strength_of
 from .gm import DRUM_CHANNEL
 from .song import PlaybackEvent, Song
 
@@ -111,6 +113,8 @@ class Engine:
         self.transpose = 0
         self.loop = False
         self.even_dynamics = False      # squeeze note velocities toward the middle at playback time
+        self.humanize = 0.0             # a strength (0 = exactly as written .. 2 = very loose) or a HumanizeConfig (see humanize.py)
+        self.humanize_seed = 0          # which 'performance' this is (the same seed always plays the same way)
         self.live: Dict[tuple, int] = {}   # notes held on a connected MIDI keyboard: (channel, pitch) -> velocity
         self.note_events: deque = deque(maxlen=256)   # (time, pitch, channel, velocity) of each note-on, for the piano effects
         self.last_vel: Dict[int, int] = {}  # sounding pitch -> velocity of its latest note-on (the piano scales effects by it)
@@ -130,8 +134,13 @@ class Engine:
 
     # ================================================================ public
     def load(self, song: Song, keep_position: bool = False, reset_mixer: bool = True):
-        events = song.playback_events()
+        active = strength_of(self.humanize) > 0.0
+        if active and (not keep_position or not self.humanize_seed):
+            self.humanize_seed = random.randrange(1, 2 ** 31)         # a new song or a fresh start: a new performance
+        events = song.playback_events(self.humanize, self.humanize_seed)
         duration = song.duration()
+        if events and active:
+            duration = max(duration, events[-1].time)                 # (a late-released last note must not be cut off)
         with self.cond:
             pos = self.position() if keep_position else 0.0
             self._silence_all()

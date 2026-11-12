@@ -17,12 +17,15 @@ from .. import HOMEPAGE, __version__, updater
 from ..backends import (BackendError, FluidSynthBackend, MidiInput, NullBackend, OutputInfo, available_outputs,
                         find_fluidsynth, find_soundfonts, list_rtmidi_inputs, open_output, rtmidi_available)
 from ..engine import Engine
+from ..humanize import LEVELS as HUMANIZE_LEVELS
+from ..humanize import SKILL_LABELS, SKILL_NAMES, SKILL_TEXT, HumanizeConfig
 from ..playlist import Playlist, is_midi_file, scan_folder
 from ..song import Song
 from .controller import Controller
 from .editor_view import EditorView
 from .mixer_view import MixerView
 from .fx_dialog import PianoFxDialog
+from .humanize_dialog import HumanizeDialog
 from .piano_strip import FxConfig, PianoStrip
 from .piano_window import DockHint, DockTitle, PianoWindow
 from .player_view import PlayerView
@@ -195,6 +198,45 @@ class MainWindow(QMainWindow):
         even.setChecked(self.engine.even_dynamics)
         even.toggled.connect(self._set_even_dynamics)
         p.addAction(even)
+        hm = p.addMenu("&Humanize (play like a person)")
+        hm.setToolTip("Nudge the timing, loudness and note lengths a little, like a pianist, instead of playing the grid exactly")
+        grp = QActionGroup(self)
+        grp.setExclusive(True)
+        self._humanize_actions = {}
+        saved = self.settings.value("humanizeConfig", "", str)
+        if saved:
+            cfg = HumanizeConfig.from_json(saved)
+        else:                                                           # (an older version saved just the strength)
+            cfg = HumanizeConfig(strength=max(0.0, min(2.0, self.settings.value("humanize", 0.0, float)))).clamped()
+        self._humanize_custom = HumanizeConfig.from_json(self.settings.value("humanizeCustom", "", str))
+        if cfg.preset_name() is None:
+            self._humanize_custom = cfg
+        self.engine.humanize = cfg
+        for key, label, tip in (("off", "Off (exactly as written)", "Every note plays exactly on the grid"),
+                                ("light", "Light", "A tidy player: small timing and volume differences"),
+                                ("natural", "Natural", "Rolled chords, a leaning melody, drifting tempo and dynamics"),
+                                ("loose", "Loose", "A sloppy, very expressive player: big differences"),
+                                ("custom", "Custom", "Your own mix (set it under Customize…)")):
+            a_ = QAction(label, self)
+            a_.setCheckable(True)
+            a_.setToolTip(tip)
+            grp.addAction(a_)
+            hm.addAction(a_)
+            a_.triggered.connect(lambda _=False, k=key: self.set_humanize(k))
+            self._humanize_actions[key] = a_
+        skill = hm.addMenu("&Skill level")
+        skill.setToolTip("Play like a beginner, an intermediate player, an advanced player or a concert pianist")
+        for key in SKILL_NAMES:
+            a_ = QAction(SKILL_LABELS[key], self)
+            a_.setCheckable(True)
+            a_.setToolTip(SKILL_TEXT[key])
+            grp.addAction(a_)                                           # (one choice across the whole Humanize menu)
+            skill.addAction(a_)
+            a_.triggered.connect(lambda _=False, k=key: self.set_humanize(k))
+            self._humanize_actions[key] = a_
+        hm.addSeparator()
+        self._act(hm, "Customize…", None, self.configure_humanize)
+        self._sync_humanize_menu(cfg)
         p.addSeparator()
         self._act(p, "Panic (all notes off)", "Ctrl+.", self.panic)
 
@@ -645,7 +687,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Export", f"Export needs FluidSynth and a SoundFont:\n{e}")
             return
         rate = 44100
-        events = self.song.playback_events()
+        events = self.song.playback_events(self.engine.humanize, self.engine.humanize_seed)    # (the export sounds like the playback)
         total = self.song.duration() + 2.0
         # A private engine applies the current mixer (mute/solo/volume/pan…)
         eng = Engine(synth)
@@ -865,6 +907,44 @@ class MainWindow(QMainWindow):
         self.piano_action.blockSignals(True)
         self.piano_action.setChecked(bool(shown))
         self.piano_action.blockSignals(False)
+
+    def _sync_humanize_menu(self, cfg: HumanizeConfig):
+        name = cfg.preset_name() or "custom"
+        for k, act in self._humanize_actions.items():
+            act.setChecked(k == name)
+        self._humanize_actions["custom"].setEnabled(name == "custom" or self._humanize_custom.preset_name() is None)
+
+    def apply_humanize(self, cfg: HumanizeConfig, message: bool = True):
+        """Use these humanize settings: remember them, reload the song with them, update the menu."""
+        cfg = HumanizeConfig.coerce(cfg).clamped()
+        if cfg.preset_name() is None:
+            self._humanize_custom = cfg
+            self.settings.setValue("humanizeCustom", cfg.to_json())
+        self.settings.setValue("humanizeConfig", cfg.to_json())
+        self.settings.setValue("humanize", cfg.strength)
+        self.ctl.set_humanize(cfg)
+        self._sync_humanize_menu(cfg)
+        if message:
+            name = cfg.preset_name()
+            self.statusBar().showMessage("Humanize: " + ("off" if cfg.strength <= 0 else SKILL_LABELS.get(name, name or "custom")), 4000)
+
+    def set_humanize(self, level: str):
+        """Playback ▸ Humanize: Off / Light / Natural / Loose / a skill level / Custom."""
+        if level == "custom":
+            cfg = replace(self._humanize_custom)
+        else:
+            cfg = HumanizeConfig.preset(level)
+        self.apply_humanize(cfg)
+
+    def configure_humanize(self):
+        """Playback ▸ Humanize ▸ Customize…"""
+        original = replace(HumanizeConfig.coerce(self.engine.humanize))
+        start = replace(original)
+        if start.strength <= 0:                                         # (opening it from Off: start from Natural, and use it)
+            start = replace(self._humanize_custom if self._humanize_custom.strength > 0 else HumanizeConfig.preset("natural"))
+        dlg = HumanizeDialog(start, lambda c: self.apply_humanize(c, message=False), self.ctl.reroll_humanize, self,
+                             original=original, apply_now=start != original)
+        dlg.exec()
 
     def _set_even_dynamics(self, on: bool):
         self.engine.even_dynamics = on

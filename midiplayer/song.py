@@ -318,23 +318,47 @@ class Song:
         return sorted(chans)
 
     # ------------------------------------------------------------ playback
-    def playback_events(self) -> List[PlaybackEvent]:
+    def playback_events(self, humanize=0.0, seed: int = 0) -> List[PlaybackEvent]:
+        """Everything the engine plays, in time order. With *humanize* above 0 the notes are nudged the way a person would
+        play them (see humanize.py): the song itself is not changed, only the times / velocities in this list."""
         tm = self.tempo_map
-        items: List[Tuple[int, int, int, bytes]] = []  # tick, prio, track, data
+        changed = {}
+        from .humanize import strength_of
+        if strength_of(humanize) > 0.0:
+            from .humanize import humanize_notes
+            changed = humanize_notes(self, tm, humanize, seed)
+        warp = changed.warp if changed else None
+
+        def moved(t: float, end: bool = False) -> float:           # (a player who knows some parts better than others speeds up and slows down:
+            return t if warp is None else t + (warp.end(t) if end else warp.start(t))      # every event moves with them)
+        items: List[Tuple[float, int, int, int, bytes]] = []            # seconds, prio, tick, track, data
         for ti, tr in enumerate(self.tracks):
             for e in tr.events:
                 if e.kind == MIDI:
-                    items.append((e.tick, 0, ti, e.data))
+                    items.append((moved(tm.tick_to_sec(e.tick)), 0, e.tick, ti, e.data))
                 elif e.kind == SYSEX and e.data[:1] == b"\xF0":
                     data = e.data if e.data.endswith(b"\xF7") else e.data + b"\xF7"
-                    items.append((e.tick, 0, ti, data))
-            for n in tr.notes:
+                    items.append((moved(tm.tick_to_sec(e.tick)), 0, e.tick, ti, data))
+            for i, n in enumerate(tr.notes):
                 if n.end <= n.start:
                     continue
-                items.append((n.start, 2, ti, bytes([0x90 | n.channel, n.pitch, max(1, min(127, n.velocity))])))
-                items.append((n.end, 1, ti, bytes([0x80 | n.channel, n.pitch, 0])))
-        items.sort(key=lambda x: (x[0], x[1]))
-        return [PlaybackEvent(tm.tick_to_sec(t), t, d, ti) for t, _, ti, d in items]
+                if changed and (ti, i) in changed.dropped:               # a missed note: never played
+                    continue
+                t_on, t_off, vel = tm.tick_to_sec(n.start), tm.tick_to_sec(n.end), n.velocity
+                if changed:
+                    t_on, t_off, vel = changed.get((ti, i), (moved(t_on), moved(t_off, end=True), vel))     # (not nudged: still follows the player's tempo)
+                pitch = changed.repitch.get((ti, i), n.pitch) if changed else n.pitch      # (a wrong note: another key)
+                items.append((t_on, 2, n.start, ti, bytes([0x90 | n.channel, pitch, max(1, min(127, vel))])))
+                items.append((t_off, 1, n.end, ti, bytes([0x80 | n.channel, pitch, 0])))
+        if changed:
+            for ti, ch, pitch, a, b, vel, tick in changed.extras:                    # notes struck by accident (fat fingers)
+                items.append((a, 2, tick, ti, bytes([0x90 | ch, pitch, max(1, min(127, vel))])))
+                items.append((b, 1, tick, ti, bytes([0x80 | ch, pitch, 0])))
+        if changed:
+            items.sort(key=lambda x: (x[0], x[1]))                      # (humanized times are not in tick order any more)
+        else:
+            items.sort(key=lambda x: (x[2], x[1]))
+        return [PlaybackEvent(t, tick, d, ti) for t, _, tick, ti, d in items]
 
     # ------------------------------------------------------------ editing
     def snapshot(self):

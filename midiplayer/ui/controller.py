@@ -60,6 +60,21 @@ class Controller(QObject):
         self.songEdited.emit()
         self._reload_timer.start()
 
+    def set_humanize(self, humanize):
+        """Play like a person: a strength (0 = exactly as written .. 2 = very loose) or a HumanizeConfig with the detail
+        amounts. Gives a fresh 'performance'."""
+        from ..humanize import HumanizeConfig
+        self.engine.humanize = HumanizeConfig.coerce(humanize)
+        self.engine.humanize_seed = 0
+        if self.song is not None:
+            self._reload_engine()
+
+    def reroll_humanize(self):
+        """Another performance of the same song with the same settings."""
+        self.engine.humanize_seed = 0
+        if self.song is not None:
+            self._reload_engine()
+
     def _reload_engine(self):
         if self.song is not None:
             self.engine.load(self.song, keep_position=True, reset_mixer=False)

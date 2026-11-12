@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.0
+- **Humanize** (new **Humanize** menu): playback that sounds like a person at the piano. It is non-destructive - the song itself is never changed - and it also applies to exported audio. Choose **Off, Light, Natural, Loose** or a **Skill level** (**Beginner, Intermediate, Advanced, Concert pianist**), or open **Customize...** for sliders: timing, tempo drift, chord spread, melody lead, velocity, dynamics, note lengths, key repetition, unfamiliar passages, stumbles, fat fingers, wrong notes, missed notes, and whether drums are included. **New performance** plays it again with different random choices.
+- **Chords** are rolled a little, never overlap the previous chord, and a key must come back up before it is struck again - repeating the same note is never instant, and fast repeats come out later and lighter.
+- **Mistakes** (skill levels): fat fingers (a neighbouring key also sounds, softer), wrong notes and missed notes. Fat fingers are rarer on repeated chords; fast repeats of one key are the likeliest to be missed.
+- **Known and unknown parts:** a beginner plays parts that come round again or are easy a little faster and cleaner, and busy or new parts slower, shakier and with more mistakes. Drums, pedal and the whole band follow the player's tempo.
+
 ## 1.3.2
 - **Held-note glow:** it is now smaller and a fixed size - it no longer grows with the effect height. Its brightness still follows the Glow strength slider and, with velocity scaling on, how hard the note was played.
 - **Velocity strength slider** (View > Piano effects): sets how strongly velocity scaling acts, from 0x (no difference) to 3x. Velocity scaling itself is also much stronger at the default: soft notes make few, small, dim particles, hard notes many big bright ones, longer lightning and wider fireworks.
